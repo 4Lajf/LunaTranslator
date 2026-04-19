@@ -1,7 +1,7 @@
 from traceback import print_exc
 from queue import Queue
 from threading import Thread
-import time, types, os
+import time, types, os, re, unicodedata
 import gobject
 import json
 import functools
@@ -9,6 +9,7 @@ from myutils.wrapper import threader
 from myutils.config import globalconfig, translatorsetting, dynamicapiname
 from myutils.utils import stringfyerror, autosql, PriorityQueue
 from myutils.commonbase import ArgsEmptyExc, commonbase
+from language import Languages
 
 
 def furigana_debug_enabled():
@@ -77,6 +78,8 @@ class GptTextWithDict:
         self.dictionary = GptDict(dictionary)
         self.rawtext = rawtext
         self.furigana = furigana.strip() if furigana else ""
+        self.retry_untranslated_once = False
+        self.retry_reason = ""
 
     def __str__(self):
         return json.dumps(
@@ -392,6 +395,99 @@ class basetrans(commonbase):
 
         return functools.partial(__maybeshow, callback, tgtlang_1)
 
+    def __normalize_retry_compare_text(self, text):
+        text = unicodedata.normalize("NFKC", text or "")
+        return "".join(
+            ch
+            for ch in text
+            if (not ch.isspace()) and (unicodedata.category(ch)[0] not in ("P", "S"))
+        )
+
+    def __count_japanese_chars(self, text):
+        return len(
+            re.findall(
+                r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff66-\uff9f々〆ヵヶ]",
+                unicodedata.normalize("NFKC", text or ""),
+            )
+        )
+
+    def __count_latin_letters(self, text):
+        return len(re.findall(r"[A-Za-z]", text or ""))
+
+    def __should_retry_untranslated_english(
+        self, tgtlang_1, contentsolved: "GptTextWithDict|str", res
+    ):
+        if tgtlang_1 != Languages.English:
+            return None
+        if not self.is_gpt_like:
+            return None
+        if isinstance(contentsolved, GptTextWithDict) and contentsolved.retry_untranslated_once:
+            return None
+        if self.srclang_1 not in (Languages.Auto, Languages.Japanese):
+            return None
+        if not isinstance(res, str) or (not res.strip()):
+            return None
+        source = (
+            contentsolved.rawtext if isinstance(contentsolved, GptTextWithDict) else contentsolved
+        )
+        if not isinstance(source, str) or (not source.strip()):
+            return None
+        if self.__count_japanese_chars(source) == 0:
+            return None
+
+        normalized_source = self.__normalize_retry_compare_text(source)
+        normalized_res = self.__normalize_retry_compare_text(res)
+        if normalized_source and (normalized_source == normalized_res):
+            return "source_echo"
+
+        jp_count = self.__count_japanese_chars(res)
+        if jp_count == 0:
+            return None
+
+        latin_count = self.__count_latin_letters(res)
+        if (latin_count == 0) and (jp_count >= 2):
+            return "mostly_japanese"
+
+        meaningful = jp_count + latin_count
+        if (
+            meaningful >= 4
+            and (jp_count / meaningful) >= 0.6
+            and jp_count >= (latin_count + 2)
+        ):
+            return "mostly_japanese"
+        return None
+
+    def __maybe_retry_untranslated_english(
+        self, tgtlang_1, contentsolved: "GptTextWithDict|str", res
+    ):
+        retry_reason = self.__should_retry_untranslated_english(
+            tgtlang_1, contentsolved, res
+        )
+        if not retry_reason:
+            return res
+
+        source = (
+            contentsolved.rawtext if isinstance(contentsolved, GptTextWithDict) else contentsolved
+        )
+        furigana_debug(
+            "AUTO_RETRY",
+            reason=retry_reason,
+            rawtext=source,
+            response=res,
+        )
+        try:
+            if isinstance(contentsolved, GptTextWithDict):
+                contentsolved.retry_untranslated_once = True
+                contentsolved.retry_reason = retry_reason
+            return self.intervaledtranslate(contentsolved)
+        except Exception as e:
+            furigana_debug(
+                "AUTO_RETRY_FAIL",
+                reason=retry_reason,
+                error=stringfyerror(e),
+            )
+            return res
+
     def translate_and_collect(
         self, tgtlang_1, contentsolved: "GptTextWithDict|str", is_auto_run, callback
     ):
@@ -414,6 +510,10 @@ class basetrans(commonbase):
             )
         if not res:
             res = self.intervaledtranslate(TS_use)
+        if not isinstance(res, types.GeneratorType):
+            res = self.__maybe_retry_untranslated_english(
+                tgtlang_1, TS_use, res
+            )
         # 不能因为被打断而放弃后面的操作，发出的请求不会因为不再处理而无效，所以与其浪费不如存下来
         # gettranslationcallback里已经有了是否为当前请求的校验，这里无脑输出就行了
 

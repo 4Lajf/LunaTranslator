@@ -404,6 +404,18 @@ class gptcommon(basetrans):
             used = True
         return prompt, used
 
+    def __retry_guard_block(self, query_2: GptTextWithDict):
+        if not getattr(query_2, "retry_reason", ""):
+            return ""
+        return (
+            "[Retry Guard]\n"
+            "A previous attempt returned the line unchanged or mostly untranslated in Japanese.\n"
+            "Retry the same [Target Line] now and output a proper English translation.\n"
+            "Do NOT copy the Japanese source text unchanged.\n"
+            "Preserve Japanese quote and bracket glyphs exactly, but translate the Japanese text inside them into English.\n"
+            "Prefer natural English VN narration over clause-by-clause Japanese syntax."
+        )
+
     def __if_has_dwp(self, dictionary: GptDict, prompt):
         _has = re.search(r"\{DictWithPrompt(.*?)\[(.*?)\]\}", prompt)
         if _has:
@@ -453,6 +465,9 @@ class gptcommon(basetrans):
         query = user_prompt.replace("{sentence}", query_1)
         if furigana and not (furigana_placeholder_used or furigana_already_used):
             query += "\n\n" + self.__furigana_block(furigana, sentence)
+        retry_guard = self.__retry_guard_block(query_2)
+        if retry_guard:
+            query += "\n\n" + retry_guard
         query = self.__parsecontextN(query)
         return query, query_1
 
