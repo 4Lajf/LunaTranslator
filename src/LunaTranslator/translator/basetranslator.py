@@ -1,7 +1,7 @@
 from traceback import print_exc
 from queue import Queue
 from threading import Thread
-import time, types
+import time, types, os
 import gobject
 import json
 import functools
@@ -9,6 +9,30 @@ from myutils.wrapper import threader
 from myutils.config import globalconfig, translatorsetting, dynamicapiname
 from myutils.utils import stringfyerror, autosql, PriorityQueue
 from myutils.commonbase import ArgsEmptyExc, commonbase
+
+
+def furigana_debug_enabled():
+    return os.environ.get("LUNA_FURIGANA_DEBUG") == "1"
+
+
+def furigana_debug_preview(value, limit=240):
+    if value is None:
+        return None
+    value = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    if len(value) > limit:
+        value = value[:limit] + "..."
+    return value
+
+
+def furigana_debug(stage, **kwargs):
+    if not furigana_debug_enabled():
+        return
+    parts = []
+    for key, value in kwargs.items():
+        if isinstance(value, str):
+            value = furigana_debug_preview(value)
+        parts.append(f"{key}={value!r}")
+    print("[FURIGANA][{}] {}".format(stage, " ".join(parts)), flush=True)
 
 
 class Interrupted(Exception):
@@ -40,12 +64,19 @@ class GptDict:
 
 
 class GptTextWithDict:
-    def __init__(self, rawtext: str = None, parsedtext: str = None, dictionary=None):
+    def __init__(
+        self,
+        rawtext: str = None,
+        parsedtext: str = None,
+        dictionary=None,
+        furigana: str = None,
+    ):
         if rawtext and not parsedtext:
             parsedtext = rawtext
         self.parsedtext = parsedtext
         self.dictionary = GptDict(dictionary)
         self.rawtext = rawtext
+        self.furigana = furigana.strip() if furigana else ""
 
     def __str__(self):
         return json.dumps(
@@ -53,6 +84,7 @@ class GptTextWithDict:
                 "text": self.parsedtext,
                 "gpt_dict": str(self.dictionary),
                 "contentraw": self.rawtext,
+                "furigana": self.furigana,
             },
             ensure_ascii=False,
         )
@@ -365,13 +397,21 @@ class basetrans(commonbase):
     ):
         if isinstance(contentsolved, GptTextWithDict):
             cache_use = contentsolved.rawtext
-            if contentsolved.dictionary:
-                cache_use = str((contentsolved, contentsolved.dictionary))
+            if contentsolved.dictionary or contentsolved.furigana:
+                cache_use = str(contentsolved)
             TS_use = contentsolved
         else:
             cache_use = TS_use = contentsolved
 
         res = self.shortorlongcacheget(cache_use, is_auto_run)
+        if isinstance(contentsolved, GptTextWithDict):
+            furigana_debug(
+                "CACHE",
+                hit=bool(res),
+                rawtext=contentsolved.rawtext,
+                furigana=contentsolved.furigana,
+                has_dictionary=bool(contentsolved.dictionary),
+            )
         if not res:
             res = self.intervaledtranslate(TS_use)
         # 不能因为被打断而放弃后面的操作，发出的请求不会因为不再处理而无效，所以与其浪费不如存下来
@@ -405,17 +445,21 @@ class basetrans(commonbase):
     def __parse_gpt_dict(self, contentsolved, optimization_params):
         gpt_dict = []
         contentraw = contentsolved
+        furigana = ""
         for _ in optimization_params:
             if isinstance(_, dict):
                 _gpt_dict = _.get("gpt_dict", None)
-                if not _gpt_dict:
-                    continue
-                gpt_dict = _gpt_dict
-                contentraw = _.get("gpt_dict_origin")
-                break
+                if _gpt_dict:
+                    gpt_dict = _gpt_dict
+                    contentraw = _.get("gpt_dict_origin")
+                if _.get("furigana_text"):
+                    furigana = _.get("furigana_text")
 
         return GptTextWithDict(
-            parsedtext=contentsolved, dictionary=gpt_dict, rawtext=contentraw
+            parsedtext=contentsolved,
+            dictionary=gpt_dict,
+            rawtext=contentraw,
+            furigana=furigana,
         )
 
     def _fythread(self):
