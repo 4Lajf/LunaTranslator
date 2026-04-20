@@ -3,7 +3,6 @@ from qtsymbols import *
 import gobject
 import os, subprocess, functools
 import time, NativeUtils, hashlib
-from urllib.parse import quote
 from myutils.config import savehook_new_data, globalconfig, relpath, _TR
 from myutils.wrapper import threader
 from myutils.utils import qimage2binary, get_time_stamp
@@ -75,15 +74,8 @@ def callback_1(callback_origin, tocliponly: bool, app, p: QPixmap):
         return True
     uid, fname = __getuidandfname(app)
     p.save(fname)
-    gobject.base.translation_ui.showMarkDownSig.emit(
-        "{}\n[{}](OPEN-{}) [{}](OPEN-{}) [{}](SCREENSHOTSETTING)".format(
-            _TR("已保存为： {}").format(fname),
-            _TR("打开图片"),
-            quote(fname),
-            _TR("打开路径"),
-            quote(os.path.dirname(fname)),
-            _TR("保存路径"),
-        )
+    gobject.base.translation_ui.showTemporaryStatusSig.emit(
+        _TR("已保存为： {}").format(fname), 3000
     )
     if uid:
         if "imagepath_all" not in savehook_new_data[uid]:
@@ -92,8 +84,7 @@ def callback_1(callback_origin, tocliponly: bool, app, p: QPixmap):
     return True
 
 
-@threader
-def grabwindow(app="PNG", callback=None, tocliponly=False):
+def _grabwindow_impl(app="PNG", callback=None, tocliponly=False):
     callback_2 = functools.partial(callback_1, callback, tocliponly, app)
 
     hwnd = windows.FindWindow(
@@ -114,6 +105,15 @@ def grabwindow(app="PNG", callback=None, tocliponly=False):
     p = safepixmap(NativeUtils.WinRT.capture_window(hwnd))
     if callback_2(p):
         return
+
+
+def grabwindow_sync(app="PNG", callback=None, tocliponly=False):
+    _grabwindow_impl(app, callback, tocliponly)
+
+
+@threader
+def grabwindow(app="PNG", callback=None, tocliponly=False):
+    _grabwindow_impl(app, callback, tocliponly)
 
 
 def getcurrexe():

@@ -1,10 +1,10 @@
 from qtsymbols import *
 import functools, gobject, NativeUtils, uuid, windows, shutil, time, math
 from myutils.config import globalconfig, _TR, saveallconfig
-from myutils.hwnd import grabwindow
+from myutils.hwnd import grabwindow, grabwindow_sync
 from traceback import print_exc
 from myutils.wrapper import threader, tryprint
-from myutils.keycode import vkcode_map
+from myutils.keycode import vkcode_map, mod_map_r
 from myutils.utils import (
     parsekeystringtomodvkcode,
     unsupportkey,
@@ -30,6 +30,13 @@ from gui.usefulwidget import (
     getsimplecombobox,
 )
 from gui.dynalang import LLabel, LAction, LDialog, LFormLayout
+
+
+PASSTHROUGH_HOTKEYS = {"_16", "_21", "_21_1"}
+BUILTIN_QUICKKEY_DEFAULTS = {
+    "_21_1": {"name": "隐藏并截图", "use": True, "keystring": "N"},
+    "_21": {"name": "窗口截图", "use": True, "keystring": "M"},
+}
 
 
 def delaycreatereferlabels(self, name):
@@ -65,6 +72,133 @@ def safeGet():
         QToolTip.showText(QCursor.pos(), _TR("取词失败"), gobject.base.commonstylebase)
         t = ""
     return t
+
+
+def _normalizekeystring(keystring: str):
+    return keystring.upper().replace("META", "WIN")
+
+
+def _ensure_builtin_quickkeys():
+    quick_all = globalconfig.setdefault("quick_setting", {}).setdefault("all", {})
+    for name, defaults in BUILTIN_QUICKKEY_DEFAULTS.items():
+        current = quick_all.get(name)
+        if not isinstance(current, dict):
+            quick_all[name] = defaults.copy()
+            continue
+        if not current.get("name"):
+            current["name"] = defaults["name"]
+        if "use" not in current:
+            current["use"] = defaults["use"]
+        current_keystring = current.get("keystring", "")
+        normalized = _normalizekeystring(current_keystring) if current_keystring else ""
+        if (not current_keystring) or (
+            name == "_21" and normalized in ("ALT+~", "ALT+`")
+        ):
+            current["keystring"] = defaults["keystring"]
+
+
+def _hotkey_conflict(self, name, keystring: str):
+    normalized = _normalizekeystring(keystring)
+    for other, config in globalconfig["quick_setting"]["all"].items():
+        if other == name or other not in self.bindfunctions:
+            continue
+        if not (config.get("use") and globalconfig["quick_setting"]["use"]):
+            continue
+        other_keystring = config.get("keystring")
+        if not other_keystring:
+            continue
+        if _normalizekeystring(other_keystring) == normalized:
+            return True
+    return False
+
+
+def _is_bound_window_focused():
+    hwnd = gobject.base.hwnd
+    if not hwnd:
+        return False
+    foreground = windows.GetForegroundWindow()
+    if not foreground:
+        return False
+    foreground = windows.GetAncestor(foreground)
+    target = windows.GetAncestor(hwnd)
+    if foreground == target:
+        return True
+    magpie = windows.FindWindow(
+        "Window_Magpie_967EB565-6F73-4E94-AE53-00CC42592A22", None
+    )
+    return bool(magpie and foreground == windows.GetAncestor(magpie))
+
+
+def _pass_through_hotkey_pressed(modes, vkcode):
+    allvk = [mod_map_r[mod] for mod in modes] + ([vkcode] if vkcode else [])
+    return bool(allvk) and all(windows.GetAsyncKeyState(vk) & 0x8000 for vk in allvk)
+
+
+def _simulate_keystring(keystring: str):
+    try:
+        modes, vkcode = parsekeystringtomodvkcode(
+            keystring, modes=True, canonlymod=True
+        )
+    except unsupportkey:
+        return False
+    modevks = [mod_map_r[mode] for mode in modes]
+    for modevk in modevks:
+        windows.keybd_event(modevk, 0, 0, 0)
+    if vkcode:
+        windows.keybd_event(vkcode, 0, 0, 0)
+    time.sleep(0.1)
+    if vkcode:
+        windows.keybd_event(vkcode, 0, windows.KEYEVENTF_KEYUP, 0)
+    for modevk in reversed(modevks):
+        windows.keybd_event(modevk, 0, windows.KEYEVENTF_KEYUP, 0)
+    return True
+
+
+def _suppress_matching_passthrough_hotkeys(self, keystring: str, duration=0.3):
+    normalized = _normalizekeystring(keystring)
+    suppress_until = time.time() + duration
+    for name in PASSTHROUGH_HOTKEYS:
+        other_keystring = globalconfig["quick_setting"]["all"].get(name, {}).get(
+            "keystring"
+        )
+        if other_keystring and _normalizekeystring(other_keystring) == normalized:
+            self.pass_through_hotkey_suppressed[name] = suppress_until
+
+
+def _trigger_configured_hotkey(self, name):
+    config = globalconfig["quick_setting"]["all"].get(name, {})
+    keystring = config.get("keystring")
+    if not keystring:
+        return False
+    _suppress_matching_passthrough_hotkeys(self, keystring)
+    self.bindfunctions[name]()
+    return _simulate_keystring(keystring)
+
+
+@threader
+def _grabwindow_toggle_translation_window(self):
+    toggled = _trigger_configured_hotkey(self, "_16")
+    try:
+        if toggled:
+            time.sleep(0.15)
+        grabwindow_sync()
+    finally:
+        if toggled:
+            time.sleep(0.15)
+            _trigger_configured_hotkey(self, "_16")
+
+
+def _poll_pass_through_hotkeys(self):
+    for name, (modes, vkcode) in tuple(self.pass_through_hotkeys.items()):
+        pressed = _pass_through_hotkey_pressed(modes, vkcode)
+        if (
+            pressed
+            and (not self.pass_through_hotkey_states.get(name, False))
+            and _is_bound_window_focused()
+        ):
+            if time.time() >= self.pass_through_hotkey_suppressed.get(name, 0):
+                self.bindfunctions[name]()
+        self.pass_through_hotkey_states[name] = pressed
 
 
 def createreloadablewrapper(self, name):
@@ -190,9 +324,13 @@ def safesaveall():
 
 
 def registrhotkeys(self):
+    _ensure_builtin_quickkeys()
     self.referlabels = {}
     self.referlabels_data = {}
     self.registok = {}
+    self.pass_through_hotkeys = {}
+    self.pass_through_hotkey_states = {}
+    self.pass_through_hotkey_suppressed = {}
     self.bindfunctions = {
         "_1": gobject.base.translation_ui.startTranslater,
         "_2": gobject.base.translation_ui.changeTranslateMode,
@@ -215,6 +353,7 @@ def registrhotkeys(self):
         "_16": gobject.base.translation_ui.showhideuisignal.emit,
         "_17": gobject.base.translation_ui.quitf_signal.emit,
         "_21": grabwindow,
+        "_21_1": functools.partial(_grabwindow_toggle_translation_window, self),
         "_22": gobject.base.translation_ui.muteprocessignal.emit,
         "41": lambda: gobject.base.translation_ui.fullsgame_signal.emit(False),
         "42": lambda: gobject.base.translation_ui.fullsgame_signal.emit(True),
@@ -254,6 +393,12 @@ def registrhotkeys(self):
         self.bindfunctions[name] = functools.partial(
             createreloadablewrapper, self, name
         )
+    self.pass_through_hotkey_timer = QTimer(self)
+    self.pass_through_hotkey_timer.setInterval(25)
+    self.pass_through_hotkey_timer.timeout.connect(
+        functools.partial(_poll_pass_through_hotkeys, self)
+    )
+    self.pass_through_hotkey_timer.start()
     for name in self.bindfunctions:
         regist_or_not_key(self, name)
 
@@ -283,7 +428,7 @@ hotkeys = [
     ["OCR", ["_13", "_14", "_14_1", "_26", "_26_1", "46", "47", "48", "49"]],
     ["剪贴板", ["36", "_4", "_28"]],
     ["TTS", ["_32", "_7", "_7_1"]],
-    ["游戏", ["_10", "_15", "_21", "_22", "43", "41", "42"]],
+    ["游戏", ["_10", "_15", "_21_1", "_21", "_22", "43", "41", "42"]],
     ["查词", ["37", "40", "39", "_29", "_30", "_35", "_33"]],
 ]
 
@@ -405,6 +550,7 @@ def selfdefkeys(self, lay: QLayout):
 
 
 def setTab_quick(self, l: QVBoxLayout):
+    _ensure_builtin_quickkeys()
 
     tab1grids = [
         [
@@ -449,6 +595,7 @@ def setTab_quick(self, l: QVBoxLayout):
 
 
 def setTab_quick_lazy(self, ls):
+    _ensure_builtin_quickkeys()
     grids = []
 
     for name in ls:
@@ -490,10 +637,14 @@ def __enable(self, x):
 
 
 def regist_or_not_key(self, name, _=None):
+    _ensure_builtin_quickkeys()
     maybesetreferlabels(self, name, "")
 
     if name in self.registok:
-        NativeUtils.UnRegisterHotKey(self.registok[name])
+        NativeUtils.UnRegisterHotKey(self.registok.pop(name))
+    self.pass_through_hotkeys.pop(name, None)
+    self.pass_through_hotkey_states.pop(name, None)
+    self.pass_through_hotkey_suppressed.pop(name, None)
     __: dict = globalconfig["quick_setting"]["all"].get(name)
     if not __:
         return
@@ -501,6 +652,21 @@ def regist_or_not_key(self, name, _=None):
     if (not keystring) or (
         not (__.get("use") and globalconfig["quick_setting"]["use"])
     ):
+        return
+
+    if _hotkey_conflict(self, name, keystring):
+        maybesetreferlabels(self, name, ("快捷键冲突"))
+        return
+
+    if name in PASSTHROUGH_HOTKEYS:
+        try:
+            modes, vkcode = parsekeystringtomodvkcode(
+                keystring, modes=True, canonlymod=True
+            )
+        except unsupportkey as e:
+            maybesetreferlabels(self, name, ("不支持的键位_") + ",".join(e.args[0]))
+            return
+        self.pass_through_hotkeys[name] = (tuple(modes), vkcode)
         return
 
     try:

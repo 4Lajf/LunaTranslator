@@ -354,6 +354,7 @@ class TranslatorWindow(resizableframeless):
     changeshowhidetranssig = pyqtSignal()
     magpiecallback = pyqtSignal(bool)
     showMarkDownSig = pyqtSignal(str)
+    showTemporaryStatusSig = pyqtSignal(str, int)
 
     def setbuttonsizeX(self):
         self.changeextendstated()
@@ -536,9 +537,17 @@ class TranslatorWindow(resizableframeless):
         raw = kwargs.get("raw", False)
         updateTranslate = kwargs.get("updateTranslate", False)
         is_auto_run = kwargs.get("is_auto_run", True)
+        track_render_state = kwargs.get("track_render_state", True)
+        if track_render_state and self._temporary_status_active:
+            self._temporary_status_active = False
+            self._temporary_status_token += 1
+            self._restore_showline_snapshot(self._tracked_render_ops)
         if text is None:
             if clear:
                 self.translate_text.clear()
+                if track_render_state:
+                    self._tracked_render_ops = []
+                    self._tracked_render_generation += 1
             return
         if iter_context:
             iter_res_status, iter_context_class = iter_context
@@ -550,6 +559,20 @@ class TranslatorWindow(resizableframeless):
                 self.show_()
         if not raw:
             text = self.cleartext(text)
+        if track_render_state:
+            snapshot = self._make_showline_snapshot(
+                name=name,
+                clear=clear,
+                texttype=texttype,
+                text=text,
+                color=color,
+                iter_context=iter_context,
+                hira=hira,
+                klass=klass,
+                raw=raw,
+                updateTranslate=updateTranslate,
+                is_auto_run=is_auto_run,
+            )
         if iter_res_status:
             self.translate_text.iter_append(
                 clear, iter_context_class, texttype, name, text, color, klass
@@ -559,6 +582,12 @@ class TranslatorWindow(resizableframeless):
                 updateTranslate, clear, texttype, name, text, hira, color, klass
             )
         self.autodisappear()
+        if track_render_state:
+            if clear:
+                self._tracked_render_ops = [snapshot]
+            else:
+                self._tracked_render_ops.append(snapshot)
+            self._tracked_render_generation += 1
 
     @property
     def isMouseHover(self):
@@ -1090,9 +1119,14 @@ class TranslatorWindow(resizableframeless):
             )
         )
         self.showMarkDownSig.connect(self.showMarkDown)
+        self.showTemporaryStatusSig.connect(self.showTemporaryStatus)
         icon = getExeIcon(getcurrexe())
         self.setWindowIcon(icon)
         self.firstshow = True
+        self._tracked_render_ops = []
+        self._tracked_render_generation = 0
+        self._temporary_status_token = 0
+        self._temporary_status_active = False
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setWindowTitle("LunaTranslator")
@@ -1298,6 +1332,57 @@ class TranslatorWindow(resizableframeless):
             hira=segs,
             raw=True,
             color=SpecialColor.RawTextColor,
+        )
+
+    def _make_showline_snapshot(self, **kwargs):
+        return dict(
+            name=kwargs.get("name", ""),
+            clear=kwargs.get("clear", True),
+            texttype=kwargs.get("texttype", TextType.Origin),
+            text=kwargs.get("text", None),
+            color=kwargs.get("color", SpecialColor.DefaultColor),
+            iter_context=kwargs.get("iter_context", None),
+            hira=list(kwargs.get("hira", [])),
+            klass=kwargs.get("klass", None),
+            raw=kwargs.get("raw", False),
+            updateTranslate=kwargs.get("updateTranslate", False),
+            is_auto_run=kwargs.get("is_auto_run", True),
+        )
+
+    def _restore_showline_snapshot(self, snapshot):
+        if not snapshot:
+            self.showline(clear=True, text=None, track_render_state=False)
+            return
+        for op in snapshot:
+            self.showline(track_render_state=False, **op)
+
+    def _restore_temporary_status(self, token, generation, snapshot):
+        if token != self._temporary_status_token:
+            return
+        if generation != self._tracked_render_generation:
+            return
+        self._temporary_status_active = False
+        self._restore_showline_snapshot(snapshot)
+
+    def showTemporaryStatus(self, text, timeout_ms=3000):
+        snapshot = [
+            self._make_showline_snapshot(**op) for op in self._tracked_render_ops
+        ]
+        generation = self._tracked_render_generation
+        self._temporary_status_token += 1
+        token = self._temporary_status_token
+        self._temporary_status_active = True
+        self.showline(
+            clear=True,
+            text=text,
+            color=SpecialColor.RawTextColor,
+            texttype=TextType.Info,
+            raw=True,
+            track_render_state=False,
+        )
+        QTimer.singleShot(
+            timeout_ms,
+            lambda: self._restore_temporary_status(token, generation, snapshot),
         )
 
     def showabout(self):
