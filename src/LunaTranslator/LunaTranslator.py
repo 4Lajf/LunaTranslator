@@ -458,6 +458,7 @@ class BASEOBJECT(QObject):
     def textgetmethod(
         self,
         text,
+        hook_furigana=None,
         is_auto_run=True,
         waitforresultcallback=None,
         waitforresultcallbackengine=None,
@@ -471,6 +472,7 @@ class BASEOBJECT(QObject):
         with self.solvegottextlock:
             succ = self.textgetmethod_1(
                 text,
+                hook_furigana=hook_furigana,
                 is_auto_run=is_auto_run,
                 waitforresultcallback=waitforresultcallback,
                 waitforresultcallbackengine=waitforresultcallbackengine,
@@ -496,6 +498,7 @@ class BASEOBJECT(QObject):
     def textgetmethod_1(
         self,
         text: str,
+        hook_furigana=None,
         is_auto_run=True,
         waitforresultcallback=None,
         waitforresultcallbackengine=None,
@@ -576,6 +579,8 @@ class BASEOBJECT(QObject):
         text_solved, optimization_params = self.solvebeforetrans(text)
         if not text_solved:
             return _showrawfunction()
+        if hook_furigana:
+            optimization_params.append({"furigana_text": hook_furigana})
 
         maybehaspremt = {}
         skip_other_on_success = False

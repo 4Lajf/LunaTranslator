@@ -99,13 +99,14 @@ class basetext:
             return
         self.textgetmethod(*arg, **kwarg)
 
-    def waitfortranslation(self, text):
+    def waitfortranslation(self, text, **kwargs):
         resultwaitor = queue.Queue()
         self.textgetmethod(
             text,
             is_auto_run=True,
             waitforresultcallback=resultwaitor.put,
             waitforresultcallbackengine=globalconfig["toppest_translator"],
+            **kwargs,
         )
         tsres: TranslateResult = resultwaitor.get()
         return tsres.result

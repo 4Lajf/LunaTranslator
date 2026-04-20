@@ -1,4 +1,9 @@
-from translator.basetranslator import basetrans, GptTextWithDict, GptDict
+from translator.basetranslator import (
+    basetrans,
+    GptTextWithDict,
+    GptDict,
+    furigana_debug,
+)
 import json, requests, hmac, hashlib, NativeUtils, re, functools
 from datetime import datetime, timezone
 from myutils.utils import (
@@ -269,6 +274,17 @@ class gptcommon(basetrans):
         )
         usingstream = self.config["流式输出"]
         messages, query, query_1 = self.commoncreatemessages(query_2)
+        furigana_debug(
+            "LLM_REQUEST",
+            model=self.config.get("model", ""),
+            endpoint=self.config.get("API接口地址", ""),
+            sentence=query_1,
+            furigana=query_2.furigana,
+            named_terms=self.__extract_bracketed_named_terms(
+                query_2.rawtext or query_2.parsedtext or ""
+            ),
+            user_prompt=query,
+        )
         apitype = APIType(self.config.get("API接口地址", ""))
         if apitype == APIType.gemini:
             response = self.request_gemini(apitype, messages, extrabody, extraheader)
@@ -304,6 +320,12 @@ class gptcommon(basetrans):
                 yield "LUNASHOWHTML" + NativeUtils.Markdown2Html(respmessage)
             else:
                 yield respmessage
+        furigana_debug(
+            "LLM_RESPONSE",
+            sentence=query_1,
+            furigana=query_2.furigana,
+            response=respmessage,
+        )
         if not (respmessage and query_1.strip() and respmessage.strip()):
             return
         self.context.append({"role": "user", "content": query_1})
@@ -333,6 +355,66 @@ class gptcommon(basetrans):
         ):
             query = re.sub(k, functools.partial(self.__replace_history, b), query)
         return query
+
+    def __extract_bracketed_named_terms(self, sentence: str):
+        if not sentence:
+            return []
+        patterns = (
+            r"『[^』]+』",
+            r"【[^】]+】",
+            r"〈[^〉]+〉",
+            r"《[^》]+》",
+        )
+        matches = []
+        for pattern in patterns:
+            matches.extend(re.findall(pattern, sentence))
+        seen = []
+        for term in matches:
+            if term not in seen:
+                seen.append(term)
+        return seen
+
+    def __furigana_block(self, furigana: str, sentence: str = ""):
+        if not furigana:
+            return ""
+        block = "[Furigana Thread]\n" + furigana
+        named_terms = self.__extract_bracketed_named_terms(sentence)
+        if named_terms:
+            block += (
+                "\n\n[Bracketed Named Term Hint]\n"
+                "The [Target Line] contains bracketed stylized named term(s): "
+                + " / ".join(named_terms)
+                + "\nRender those bracketed named term(s) from the furigana reading above, not from the literal kanji gloss.\n"
+                "Preserve the original Japanese brackets exactly.\n"
+                "Do not translate those bracketed named term(s) literally."
+            )
+        return block
+
+    def __inject_furigana(self, prompt: str, furigana: str, sentence: str = ""):
+        if not prompt:
+            return prompt, False
+        used = False
+        if "{furigana}" in prompt:
+            prompt = prompt.replace("{furigana}", furigana or "")
+            used = True
+        if "{furiganaBlock}" in prompt:
+            prompt = prompt.replace(
+                "{furiganaBlock}", self.__furigana_block(furigana or "", sentence)
+            )
+            used = True
+        return prompt, used
+
+    def __retry_guard_block(self, query_2: GptTextWithDict):
+        if not getattr(query_2, "retry_reason", ""):
+            return ""
+        return (
+            "[Retry Guard]\n"
+            "A previous attempt returned the line unchanged or mostly untranslated in Japanese.\n"
+            "Retry the same [Target Line] now and output a proper English translation.\n"
+            "Do NOT copy the Japanese source text unchanged.\n"
+            "Preserve Japanese quote and bracket glyphs exactly, but translate the Japanese text inside them into English.\n"
+            "Prefer natural English VN narration over clause-by-clause Japanese syntax."
+        )
 
     def __if_has_dwp(self, dictionary: GptDict, prompt):
         _has = re.search(r"\{DictWithPrompt(.*?)\[(.*?)\]\}", prompt)
@@ -365,22 +447,40 @@ class gptcommon(basetrans):
             prompt = re.sub(r"\{DictWithPrompt(.*?)\[(.*?)\]\}([\s\S]?)", __rep, prompt)
         return prompt, bool(_has)
 
-    def __gpt_create_query_maybe_with_dict(self, query_2: GptTextWithDict, _has_1):
+    def __gpt_create_query_maybe_with_dict(
+        self, query_2: GptTextWithDict, _has_1, furigana_already_used=False
+    ):
 
+        furigana = query_2.furigana
+        sentence = query_2.rawtext or query_2.parsedtext or ""
         user_prompt = self._gptlike_get_user_prompt(
             "use_user_user_prompt", "user_user_prompt"
         )
         user_prompt, _has = self.__if_has_dwp(query_2.dictionary, user_prompt)
+        user_prompt, furigana_placeholder_used = self.__inject_furigana(
+            user_prompt, furigana, sentence
+        )
         _has = _has or _has_1
         query_1 = (query_2.parsedtext, query_2.rawtext)[_has]
         query = user_prompt.replace("{sentence}", query_1)
+        if furigana and not (furigana_placeholder_used or furigana_already_used):
+            query += "\n\n" + self.__furigana_block(furigana, sentence)
+        retry_guard = self.__retry_guard_block(query_2)
+        if retry_guard:
+            query += "\n\n" + retry_guard
         query = self.__parsecontextN(query)
         return query, query_1
 
     def commoncreatemessages(self, query_2: GptTextWithDict):
+        sentence = query_2.rawtext or query_2.parsedtext or ""
         sysprompt = self._gptlike_createsys("使用自定义promt", "自定义promt")
         sysprompt, _has = self.__if_has_dwp(query_2.dictionary, sysprompt)
-        query, query_1 = self.__gpt_create_query_maybe_with_dict(query_2, _has)
+        sysprompt, sysprompt_uses_furigana = self.__inject_furigana(
+            sysprompt, query_2.furigana, sentence
+        )
+        query, query_1 = self.__gpt_create_query_maybe_with_dict(
+            query_2, _has, furigana_already_used=sysprompt_uses_furigana
+        )
         sysprompt = self.__parsecontextN(sysprompt)
         message = [{"role": "system", "content": sysprompt}]
         checknum = self.config["附带上下文个数"]

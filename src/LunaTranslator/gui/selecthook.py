@@ -471,6 +471,10 @@ class hookselect(closeashidewindow):
                 return row
         return -1
 
+    def setswitchchecked(self, switch, checked):
+        if switch and switch.isChecked() != checked:
+            switch.setChecked(checked)
+
     def update_item_new_line_function(self, key, output: str):
         row = self.querykeyindex(key)
         if row == -1:
@@ -478,7 +482,7 @@ class hookselect(closeashidewindow):
         if self.is_focus_normal and row == self.tttable.currentIndex().row():
             self.getnewsentence(output)
         output = output[:200].replace("\n", " ")
-        colidx = 2 + int(bool(self.embedablenum))
+        colidx = 3 + int(bool(self.embedablenum))
         self.ttCombomodelmodel.item(row, colidx).setText(output)
 
     def removehook(self, key):
@@ -495,8 +499,8 @@ class hookselect(closeashidewindow):
         self.embedablenum -= 1
         if self.embedablenum > 0:
             return
-        self.currentheader.pop(1)
-        self.ttCombomodelmodel.removeColumn(1)
+        self.currentheader.pop(2)
+        self.ttCombomodelmodel.removeColumn(2)
         self.ttCombomodelmodel.setHorizontalHeaderLabels(self.currentheader)
 
     def solveifembedablenumincreaseto1(self, key, isembedable):
@@ -507,11 +511,11 @@ class hookselect(closeashidewindow):
         if self.embedablenum != 1:
             return
 
-        self.currentheader.insert(1, "内嵌")
-        self.ttCombomodelmodel.insertColumn(1, [])
+        self.currentheader.insert(2, "内嵌")
+        self.ttCombomodelmodel.insertColumn(2, [])
         self.ttCombomodelmodel.setHorizontalHeaderLabels(self.currentheader)
         self.tttable.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents
+            2, QHeaderView.ResizeMode.ResizeToContents
         )
 
     def changeprocessclear(self):
@@ -520,7 +524,7 @@ class hookselect(closeashidewindow):
         self.textOutput.clear()
         self.allres = OrderedDict()
         self.hidesearchhookbuttons()
-        self.currentheader = ["显示", "HOOK", "文本"]
+        self.currentheader = ["显示", "注音", "HOOK", "文本"]
         self.saveifembedable = {}
         self.embedablenum = 0
         self.embedselectall = {}
@@ -528,11 +532,15 @@ class hookselect(closeashidewindow):
 
     def addnewhook(self, key, select, isembedable):
         hc, hn, tp = key
+        furigana = key == self.textsource.furigana_hook
 
         if self.ttCombomodelmodel.rowCount() == 0:
             self.ttCombomodelmodel.setHorizontalHeaderLabels(self.currentheader)
             self.tttable.horizontalHeader().setSectionResizeMode(
                 0, QHeaderView.ResizeMode.ResizeToContents
+            )
+            self.tttable.horizontalHeader().setSectionResizeMode(
+                1, QHeaderView.ResizeMode.ResizeToContents
             )
             self.tttable.horizontalHeader().setSectionResizeMode(
                 len(self.currentheader) - 1, QHeaderView.ResizeMode.Interactive
@@ -544,35 +552,39 @@ class hookselect(closeashidewindow):
         selectbutton = getsimpleswitch(
             {1: select}, 1, callback=functools.partial(self.accept, key)
         )
-        if self.hookselectall.get(hc, False):
-            selectbutton.click()
+        furiganabutton = MySwitch(sign=furigana)
+        furiganabutton.clicked.connect(functools.partial(self.accept_furigana, key))
         rown = 0 if isembedable else self.ttCombomodelmodel.rowCount()
 
         items = [
+            QStandardItem(),
             QStandardItem(),
             QStandardItem("%s %s %x:%x" % (hn, hc, tp.ctx, tp.ctx2)),
             QStandardItem(),
         ]
         if self.embedablenum:
-            items.insert(1, QStandardItem())
+            items.insert(2, QStandardItem())
         self.ttCombomodelmodel.insertRow(rown, items)
         items[0].setData(key, self.SaveTextThreadRole)
 
         self.tttable.setIndexWidget(self.ttCombomodelmodel.index(rown, 0), selectbutton)
+        self.tttable.setIndexWidget(self.ttCombomodelmodel.index(rown, 1), furiganabutton)
         if isembedable:
             checkbtn = MySwitch(sign=self._check_tp_using(key))
 
             checkbtn.clicked.connect(functools.partial(self._embedbtnfn, key))
 
             self.tttable.setIndexWidget(
-                self.ttCombomodelmodel.index(rown, 1),
+                self.ttCombomodelmodel.index(rown, 2),
                 checkbtn,
             )
-            if self.embedselectall.get(hc, False):
+            if self.embedselectall.get(hc, False) and (not checkbtn.isChecked()):
                 checkbtn.click()
+        if self.hookselectall.get(hc, False) and (not selectbutton.isChecked()):
+            selectbutton.click()
 
-        if select and self.tttable.currentIndex() == -1:
-            self.tttable.setCurrentIndex(rown)
+        if select and (not self.tttable.currentIndex().isValid()):
+            self.tttable.setCurrentIndex(self.ttCombomodelmodel.index(rown, 0))
 
     def _check_tp_using(self, key):
         hc, hn, tp = key
@@ -764,7 +776,7 @@ class hookselect(closeashidewindow):
         index = self.tttable.currentIndex()
         if not index.isValid():
             return
-        elif (self.embedablenum and index.column() == 1) or (index.column() == 0):
+        elif (self.embedablenum and index.column() == 2) or (index.column() == 0):
             return self.parse_hook_menu(index)
         elif self.tttable.indexWidget(index):
             return
@@ -940,6 +952,12 @@ class hookselect(closeashidewindow):
     def accept(self, key, select):
         try:
             hc, hn, tp = key
+            if select and key == self.textsource.furigana_hook:
+                row = self.querykeyindex(key)
+                if row != -1:
+                    self.setswitchchecked(self.tttable.indexWidgetX(row, 1), False)
+                self.textsource.set_furigana_hook(None)
+                savehook_new_data[gobject.base.gameuid]["furigana_hook"] = None
             self.textsource.usermanualaccepthooks.append(key)
             self.textsource.edit_selectedhook_remove(key)
 
@@ -971,11 +989,40 @@ class hookselect(closeashidewindow):
         except:
             print_exc()
 
+    def accept_furigana(self, key, select):
+        try:
+            row = self.querykeyindex(key)
+            if select:
+                previous = self.textsource.furigana_hook
+                if previous and previous != key:
+                    previous_row = self.querykeyindex(previous)
+                    if previous_row != -1:
+                        self.setswitchchecked(
+                            self.tttable.indexWidgetX(previous_row, 1), False
+                        )
+                if key in self.textsource.selectedhook:
+                    if row != -1:
+                        self.setswitchchecked(self.tttable.indexWidgetX(row, 0), False)
+                    self.accept(key, False)
+                self.textsource.set_furigana_hook(key)
+                savehook_new_data[gobject.base.gameuid]["furigana_hook"] = (
+                    self.textsource.serialkey(key)
+                )
+            else:
+                if self.textsource.furigana_hook == key:
+                    self.textsource.set_furigana_hook(None)
+                    savehook_new_data[gobject.base.gameuid]["furigana_hook"] = None
+        except:
+            print_exc()
+
     def showEvent(self, e):
         gobject.base.safecloseattachprocess()
-        if len(self.textsource.selectedhook) == 0:
+        if len(self.textsource.selectedhook):
+            row = self.querykeyindex(self.textsource.selectedhook[0])
+        elif self.textsource.furigana_hook:
+            row = self.querykeyindex(self.textsource.furigana_hook)
+        else:
             return
-        row = self.querykeyindex(self.textsource.selectedhook[0])
         if row == -1:
             return
         self.tttable.setCurrentIndex(self.ttCombomodelmodel.index(row, 0))

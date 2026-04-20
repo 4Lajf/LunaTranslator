@@ -39,6 +39,30 @@ from ctypes import (
 from ctypes.wintypes import DWORD, LPCWSTR
 
 
+def furigana_debug_enabled():
+    return os.environ.get("LUNA_FURIGANA_DEBUG") == "1"
+
+
+def furigana_debug_preview(value, limit=240):
+    if value is None:
+        return None
+    value = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    if len(value) > limit:
+        value = value[:limit] + "..."
+    return value
+
+
+def furigana_debug(stage, **kwargs):
+    if not furigana_debug_enabled():
+        return
+    parts = []
+    for key, value in kwargs.items():
+        if isinstance(value, str):
+            value = furigana_debug_preview(value)
+        parts.append(f"{key}={value!r}")
+    print("[FURIGANA][{}] {}".format(stage, " ".join(parts)), flush=True)
+
+
 class ThreadParam(Structure):
     _fields_ = [
         ("processId", c_uint),
@@ -137,25 +161,160 @@ class texthook(basetext):
         self.multiselectedcollectorlock = threading.Lock()
         self.lastflushtime = 0
         self.runonce_line = ""
+        self.furigana_hook = None
+        self.autostartfuriganahook = None
+        self.furigana_lock = threading.RLock()
+        self.furigana_wait_window = 0.35
+        self.furigana_pre_window = 0.75
+        self.latest_furigana_text = ""
+        self.latest_furigana_time = 0
+        self.furigana_history = []
+        self.pending_main_text = None
+        self.pending_main_time = 0
+        self.pending_main_consume = True
         gobject.base.autoswitchgameuid = False
         self.initdll()
         self.delaycollectallselectedoutput()
         self.autohookmonitorthread()
+
+    def _sync_thread_if_used(self, key):
+        if not key:
+            return
+        _, _, tp = key
+        using = (key in self.selectedhook) or (key == self.furigana_hook)
+        self.Luna_SyncThread(tp, using)
 
     def edit_selectedhook_remove(self, key):
         try:
             self.selectedhook.remove(key)
         except:
             pass
-        _, _, tp = key
-        self.Luna_SyncThread(tp, False)
+        self._sync_thread_if_used(key)
 
     def edit_selectedhook_insert(self, key, idx=-1):
         if idx == -1:
             idx = len(self.selectedhook)
         self.selectedhook.insert(idx, key)
-        _, _, tp = key
-        self.Luna_SyncThread(tp, True)
+        self._sync_thread_if_used(key)
+
+    def clear_furigana_buffer(self):
+        with self.furigana_lock:
+            self.latest_furigana_text = ""
+            self.latest_furigana_time = 0
+            self.furigana_history = []
+            self.pending_main_text = None
+            self.pending_main_time = 0
+            self.pending_main_consume = True
+
+    def prune_furigana_history(self, now=None):
+        if now is None:
+            now = time.time()
+        cutoff = max(self.furigana_pre_window, self.furigana_wait_window) + 2.0
+        self.furigana_history = [
+            item for item in self.furigana_history if now - item["time"] <= cutoff
+        ]
+
+    def set_furigana_hook(self, key):
+        previous = self.furigana_hook
+        if previous == key:
+            furigana_debug(
+                "HOOK_SELECT", selected=bool(key), previous=previous, current=key
+            )
+            return
+        self.furigana_hook = key
+        self.clear_furigana_buffer()
+        if previous:
+            self._sync_thread_if_used(previous)
+        if key:
+            self._sync_thread_if_used(key)
+            try:
+                _, _, tp = key
+                history = self.QueryThreadHistory(tp, True)
+                if history:
+                    now = time.time()
+                    with self.furigana_lock:
+                        self.latest_furigana_text = history
+                        self.latest_furigana_time = now
+                        self.furigana_history.append(
+                            {"text": history, "time": now, "used": False}
+                        )
+            except:
+                print_exc()
+        furigana_debug("HOOK_SELECT", selected=bool(key), previous=previous, current=key)
+
+    def get_furigana_prompt_info(self, match_time=None, consume_furigana=False):
+        if match_time is None:
+            match_time = time.time()
+        if not self.furigana_hook:
+            return {"text": "", "status": "disabled", "age": None}
+        with self.furigana_lock:
+            self.prune_furigana_history(match_time)
+            best_index = None
+            best_distance = None
+            best_age = None
+            for index, item in enumerate(self.furigana_history):
+                age = match_time - item["time"]
+                if age < -self.furigana_wait_window or age > self.furigana_pre_window:
+                    continue
+                if consume_furigana and item.get("used"):
+                    continue
+                distance = abs(age)
+                if (best_distance is None) or (distance < best_distance):
+                    best_index = index
+                    best_distance = distance
+                    best_age = age
+            if best_index is not None:
+                item = self.furigana_history[best_index]
+                if consume_furigana:
+                    item["used"] = True
+                return {
+                    "text": item["text"],
+                    "status": "matched",
+                    "age": best_age,
+                }
+            if self.latest_furigana_text:
+                return {
+                    "text": "",
+                    "status": "stale",
+                    "age": match_time - self.latest_furigana_time,
+                }
+        return {"text": "", "status": "missing", "age": None}
+
+    def get_furigana_prompt_text(self, match_time=None, consume_furigana=False):
+        return self.get_furigana_prompt_info(match_time, consume_furigana)["text"]
+
+    def queue_main_dispatch(self, text, consume_furigana=True):
+        with self.furigana_lock:
+            has_pending = self.pending_main_text is not None
+        if has_pending:
+            self.flush_pending_main_dispatch(force=True)
+        with self.furigana_lock:
+            self.pending_main_text = text
+            self.pending_main_time = time.time()
+            self.pending_main_consume = consume_furigana
+        furigana_debug("WAIT_MAIN", main=text, wait_window=self.furigana_wait_window)
+
+    def flush_pending_main_dispatch(self, force=False):
+        with self.furigana_lock:
+            if self.pending_main_text is None:
+                return False
+            if (not force) and (
+                time.time() < self.pending_main_time + self.furigana_wait_window
+            ):
+                return False
+            text = self.pending_main_text
+            match_time = self.pending_main_time
+            consume_furigana = self.pending_main_consume
+            self.pending_main_text = None
+            self.pending_main_time = 0
+            self.pending_main_consume = True
+        self.dispatchtext(
+            text,
+            match_time=match_time,
+            consume_furigana=consume_furigana,
+            allow_wait=False,
+        )
+        return True
 
     def initdll(self):
         LunaHost = CDLL(
@@ -345,16 +504,22 @@ class texthook(basetext):
         if autostart:
             autostarthookcode = self.hconfig.get("hook", [])
             needinserthookcode = self.hconfig.get("needinserthookcode", [])
+            autostartfuriganahook = self.hconfig.get("furigana_hook")
             injecttimeout = self.hconfig.get("inserthooktimeout", 250) / 1000
         else:
             injecttimeout = 0
             autostarthookcode = []
             needinserthookcode = []
+            autostartfuriganahook = None
 
         self.autostarthookcode = [self.deserial(__) for __ in autostarthookcode]
+        self.autostartfuriganahook = (
+            self.deserial(autostartfuriganahook) if autostartfuriganahook else None
+        )
 
         self.needinserthookcode = needinserthookcode
         self.removedaddress = []
+        self.set_furigana_hook(None)
 
         self.gamepath = gamepath
         self.is64bit = NativeUtils.Is64bit(pids[0])
@@ -503,12 +668,16 @@ class texthook(basetext):
         if not self.isautorunning:
             return self.embedcallback(text, "", tp)
         if self.safeembedcheck(text):
-            trans = self.waitfortranslation(text)
+            trans = self.waitfortranslation(
+                text, hook_furigana=self.get_furigana_prompt_text()
+            )
         else:
             collect = []
             for _ in text.split("\n"):
                 if _ and self.safeembedcheck(_):
-                    _ = self.waitfortranslation(_)
+                    _ = self.waitfortranslation(
+                        _, hook_furigana=self.get_furigana_prompt_text()
+                    )
                     if not _:
                         continue
                 collect.append(_)
@@ -562,6 +731,8 @@ class texthook(basetext):
 
     def onremovehook(self, hc, hn: bytes, tp):
         key = (hc, hn.decode("utf8"), tp)
+        if key == self.furigana_hook:
+            self.set_furigana_hook(None)
         gobject.base.hookselectdialog.removehooksignal.emit(key)
 
     def match_compatibility(self, key, key2):
@@ -600,6 +771,13 @@ class texthook(basetext):
                 else:
                     insertindex = j + 1
             self.edit_selectedhook_insert(key, insertindex)
+        if (
+            self.autostartfuriganahook
+            and (self.furigana_hook is None)
+            and (key not in self.selectedhook)
+            and self.match_compatibility(key, self.autostartfuriganahook)
+        ):
+            self.set_furigana_hook(key)
         gobject.base.hookselectdialog.addnewhooksignal.emit(key, select, isembedable)
 
     def setlang(self):
@@ -679,6 +857,7 @@ class texthook(basetext):
     def delaycollectallselectedoutput(self):
         while not self.ending:
             time.sleep(0.01)
+            self.flush_pending_main_dispatch()
             if time.time() < self.lastflushtime + min(
                 0.1, self.config["textthreaddelay"] / 1000
             ):
@@ -686,16 +865,22 @@ class texthook(basetext):
             if len(self.multiselectedcollector) == 0:
                 continue
             with self.multiselectedcollectorlock:
-                self.dispatchtextlines(self.multiselectedcollector)
+                self.dispatchtextlines(
+                    self.multiselectedcollector, match_time=time.time()
+                )
                 self.multiselectedcollector.clear()
 
-    def dispatchtextlines(self, keyandtexts: list):
+    def dispatchtextlines(self, keyandtexts: list, match_time=None, consume_furigana=True):
         try:
             keyandtexts.sort(key=lambda xx: self.selectedhook.index(xx[0]))
         except:
             pass
         _collector = globalconfig["multihookmergeby"].join([_[1] for _ in keyandtexts])
-        self.dispatchtext(_collector)
+        self.dispatchtext(
+            _collector,
+            match_time=match_time,
+            consume_furigana=consume_furigana,
+        )
 
     def dispatchtext_multiline_delayed(self, key, text):
         with self.multiselectedcollectorlock:
@@ -705,9 +890,22 @@ class texthook(basetext):
     def handle_output(self, hc, hn: bytes, tp, output):
 
         key = (hc, hn.decode("utf8"), tp)
+        if key == self.furigana_hook:
+            now = time.time()
+            with self.furigana_lock:
+                self.latest_furigana_text = output
+                self.latest_furigana_time = now
+                self.furigana_history.append({"text": output, "time": now, "used": False})
+                self.prune_furigana_history(now)
+                has_pending = self.pending_main_text is not None
+            furigana_debug("HOOK_CAPTURE", thread=key, furigana=output)
+            if has_pending:
+                self.flush_pending_main_dispatch(force=True)
+            gobject.base.hookselectdialog.update_item_new_line.emit(key, output)
+            return
         if key in self.selectedhook:
             if len(self.selectedhook) == 1:
-                self.dispatchtext(output)
+                self.dispatchtext(output, match_time=time.time())
             else:
                 self.dispatchtext_multiline_delayed(key, output)
         gobject.base.hookselectdialog.update_item_new_line.emit(key, output)
@@ -727,11 +925,36 @@ class texthook(basetext):
             xx.append(self.serialkey(key))
         return xx
 
-    def dispatchtext(self, text):
+    def dispatchtext(
+        self, text, match_time=None, consume_furigana=True, allow_wait=True
+    ):
         self.runonce_line = text
         if len(text) > globalconfig.get("maxOutputSize", 10000):
             return
-        return super().dispatchtext(text, isFromHook=True)
+        if match_time is None:
+            match_time = time.time()
+        if self.furigana_hook and allow_wait:
+            furigana_info = self.get_furigana_prompt_info(
+                match_time=match_time, consume_furigana=False
+            )
+            if not furigana_info["text"]:
+                self.queue_main_dispatch(text, consume_furigana=consume_furigana)
+                return
+        furigana_info = self.get_furigana_prompt_info(
+            match_time=match_time, consume_furigana=consume_furigana
+        )
+        furigana_debug(
+            "DISPATCH",
+            main=text,
+            furigana=furigana_info["text"] or None,
+            status=furigana_info["status"],
+            age=furigana_info["age"],
+        )
+        return super().dispatchtext(
+            text,
+            isFromHook=True,
+            hook_furigana=furigana_info["text"],
+        )
 
     def gettextonce(self):
         return self.runonce_line
