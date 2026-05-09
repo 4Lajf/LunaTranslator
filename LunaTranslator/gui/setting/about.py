@@ -111,6 +111,7 @@ def updatexx(self):
                         else ""
                     ),
                 ),
+                default=True,
             ),
             getsmalllabel(""),
             getsmalllabel("最新版本"),
@@ -136,7 +137,7 @@ def _progresssignal4(
 ):
     downloadprogress.setValue(val)
     downloadprogress.setFormat(text)
-    if (val or text) and globalconfig["autoupdate"]:
+    if (val or text) and globalconfig.get("autoupdate", True):
         updatelayout.setRowVisible(2, True)
 
 
@@ -285,7 +286,7 @@ class delayloadsvg(QSvgWidget):
         return super().event(a0)
 
     def loadh(self):
-        h = QFontMetricsF(self.font()).height()
+        h = QFontMetricsF(self.font(), self).height()
         renderer = self.renderer()
         if renderer != None:
             size = renderer.defaultSize()

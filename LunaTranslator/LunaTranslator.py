@@ -77,6 +77,50 @@ from textio.textoutput.outputerbase import Base as outputerbase
 from myutils.updater import versioncheckthread
 from gui.qevent import DarkLightChangedEvent
 from gui.setting.translate import autostartllamacpp
+from collections import OrderedDict
+from itertools import islice
+
+
+class HistoryHelper:
+    # 仅记录主界面中显示的内容，不要显示具有回调的内容。
+    class singlehistory:
+        def __init__(self, text: str):
+            self.text = text
+            self.trans: "OrderedDict[str, str]" = OrderedDict()
+
+        def appendtrans(self, api, trans):
+            self.trans[api] = trans
+
+        def __repr__(self):
+            return str(dict(text=self.text, trans=self.trans))
+
+    def __init__(self):
+        self.record: "OrderedDict[uuid.UUID, HistoryHelper.singlehistory]" = (
+            OrderedDict()
+        )
+        self.viewptr = -1
+
+    def __repr__(self):
+        return str(self.record)
+
+    def appendtext(self, uid, text):
+        self.viewptr = -1
+        self.record[uid] = HistoryHelper.singlehistory(text)
+
+    def appendtrans(self, uid, api, trans):
+        if uid not in self.record:
+            return
+        self.record[uid].appendtrans(api, trans)
+
+    def get_offset(self, offset: int):
+        to = self.viewptr + offset
+        if to >= 0:
+            return
+        if to < -len(self.record):
+            return
+        self.viewptr = to
+        pos = len(self.record) + to
+        return next(islice(self.record.values(), pos, pos + 1))
 
 
 class BASEOBJECT(QObject):
@@ -113,8 +157,10 @@ class BASEOBJECT(QObject):
     llamacppstdoutstatus = pyqtSignal(dict)
     llamacppcurrversion = pyqtSignal(object)
     llamacpparchcheck = pyqtSignal(object)
-    llamacppdownloadprogress = pyqtSignal(str, float)
+    llamacppdownloadprogress = pyqtSignal(str, str, object, object)
     llamacppdownloadcheck = pyqtSignal(int)
+    llamacppposttask = pyqtSignal(str, object)
+    wheelhistory = pyqtSignal(int)
 
     def connectsignal(self, signal: pyqtBoundSignal, callback):
         if signal in self.__cachesignal:
@@ -174,6 +220,7 @@ class BASEOBJECT(QObject):
         self.RichMessageBox.connect(
             lambda _: RichMessageBox(gobject.base.focusWindow, *_)
         )
+        self.wheelhistory.connect(self.__wheelhistory)
 
     @property
     def currentread(self):
@@ -187,10 +234,31 @@ class BASEOBJECT(QObject):
         elif context == (True, True):
             return (self.currenttranslate_1, self.currenttext)[self.latest_is_origin]
 
+    def __wheelhistory(self, offset: int):
+        if not globalconfig.get("enable_wheel_history", True):
+            return
+        hist = self.history.get_offset(offset)
+        if not hist:
+            return
+        self.translation_ui.displayraw1.emit(hist.text, False, False)
+        for classname, trans in hist.trans.items():
+            try:
+                displayreskwargs = dict(
+                    name=_TR(dynamicapiname(classname)),
+                    color=TranslateColor(classname),
+                    res=trans,
+                    klass=classname,
+                )
+                self.translation_ui.displayres.emit(displayreskwargs)
+            except:
+                print_exc()
+
     def __init__(self) -> None:
         super().__init__()
         self.initsignals()
+        self.history = HistoryHelper()
         self.currentisdark = None
+        self.currentmica = None
         self.update_avalable = False
         self.translators: "dict[str, basetrans]" = {}
         self.cishus: "dict[str, cishubase]" = {}
@@ -308,6 +376,8 @@ class BASEOBJECT(QObject):
             else:
                 if self.autoswitchgameuid:
                     self.gameuid = 0
+        if self.textsource:
+            self.textsource.hwndChanged(__hwnd)
         if globalconfig["keepontop"]:
             self.translation_ui.settop()
 
@@ -517,7 +587,7 @@ class BASEOBJECT(QObject):
             return
         origin = text
         __erroroutput = functools.partial(self.__erroroutput, None, erroroutput, None)
-        currentsignature = uuid.uuid4()
+        currentsignature = uuid.uuid4() if not isRefresh else self.currentsignature
         try:
             text = POSTSOLVE(text, isEx=waitforresultcallback, isFromHook=isFromHook)
             gobject.base.showandsolvesig.emit(origin, text)
@@ -562,8 +632,14 @@ class BASEOBJECT(QObject):
             _showrawfunction_unsafe = functools.partial(
                 self.translation_ui.displayraw1.emit, text, updateTranslate, is_auto_run
             )
-        _showrawfunction = lambda: (
-            _showrawfunction_unsafe() if _showrawfunction_unsafe else None
+
+        def __(_, uid, text):
+            if _:
+                _()
+            self.history.appendtext(uid, text)
+
+        _showrawfunction = functools.partial(
+            __, _showrawfunction_unsafe, currentsignature, text
         )
         if statusok and not isRefresh:
             self.transhis.getnewsentencesignal.emit(text)
@@ -645,7 +721,7 @@ class BASEOBJECT(QObject):
             _showrawfunction = functools.partial(
                 self._delaypreparefixrank, _showrawfunction, real_fix_rank, is_auto_run
             )
-        if not (updateTranslate or globalconfig["refresh_on_get_trans"]):
+        if not (updateTranslate or globalconfig.get("refresh_on_get_trans", False)):
             _showrawfunction()
             _showrawfunction = None
         read_trans_once_check = []
@@ -668,7 +744,6 @@ class BASEOBJECT(QObject):
                 read_trans_once_check=read_trans_once_check,
                 erroroutput=erroroutput,
                 statusok=statusok,
-                isRefresh=isRefresh,
             )
         return True
 
@@ -711,7 +786,6 @@ class BASEOBJECT(QObject):
         read_trans_once_check: list,
         erroroutput,
         statusok=True,
-        isRefresh=False,
     ):
         callback = partial(
             self.GetTranslationCallback,
@@ -726,7 +800,6 @@ class BASEOBJECT(QObject):
             erroroutput,
             statusok=statusok,
             is_auto_run=is_auto_run,
-            isRefresh=isRefresh,
         )
         task = (
             callback,
@@ -772,7 +845,6 @@ class BASEOBJECT(QObject):
         iserror=False,
         statusok=True,
         is_auto_run=True,
-        isRefresh=False,
     ):
         with self.gettranslatelock:
             if classname in usefultranslators:
@@ -806,6 +878,7 @@ class BASEOBJECT(QObject):
                 (currentsignature == self.currentsignature)
                 and (iter_res_status in (0, 1))
                 and (not waitforresultcallback)
+                and (self.history.viewptr == -1)
             ):
                 displayreskwargs = dict(
                     name=_TR(dynamicapiname(classname)),
@@ -818,7 +891,9 @@ class BASEOBJECT(QObject):
                 self.translation_ui.displayres.emit(displayreskwargs)
             if iter_res_status in (0, 2):  # 0为普通，1为iter，2为iter终止
 
-                if statusok and not isRefresh:
+                if statusok:
+                    if not waitforresultcallback:
+                        self.history.appendtrans(currentsignature, classname, res)
                     self.transhis.getnewtranssignal.emit(
                         _TR(dynamicapiname(classname)), res
                     )
@@ -1228,9 +1303,7 @@ class BASEOBJECT(QObject):
             else:
                 NativeUtils.clearEffect(int(widget.winId()))
         else:
-            NativeUtils.SetTheme(
-                int(widget.winId()), dark, globalconfig["WindowBackdrop"]
-            )
+            NativeUtils.SetTheme(int(widget.winId()), dark, self.currentmica)
 
     def checkkeypresssatisfy(self, key, df=False):
         if not globalconfig["wordclickkbtriggerneed"].get(key, df):
@@ -1268,6 +1341,17 @@ class BASEOBJECT(QObject):
             return os.startfile(unquote(link[5:]))
         if link == "WEIXIN":
             return self.createimageviewsig.emit(parent)
+        if link == "WDADDEXCEPTION":
+            return windows.ShellExecute(
+                0,
+                "runas",
+                "powershell",
+                r'Add-MpPreference -ExclusionPath "{}"'.format(
+                    os.path.normpath(os.path.dirname(getcurrexe()))
+                ),
+                None,
+                windows.SW_HIDE,
+            )
         if link == "/":
             link = dynamiclink("", docs=True)
         os.startfile(link)
@@ -1430,12 +1514,13 @@ class BASEOBJECT(QObject):
 
         dark = nowisdark()
         qtawesome.isdark = dark
-        if self.currentisdark != dark:
+        __curr = (dark, globalconfig.get("WindowBackdrop", 3))
+        if (self.currentisdark, self.currentmica) != __curr:
+            self.currentisdark, self.currentmica = __curr
             for widget in QApplication.allWidgets():
                 QApplication.postEvent(widget, DarkLightChangedEvent(dark))
             for widget in QApplication.topLevelWidgets():
                 self.setdarkandbackdrop(widget, dark)
-        self.currentisdark = dark
         darklight = ["light", "dark"][dark]
 
         style = ""
