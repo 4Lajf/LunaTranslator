@@ -20,3 +20,7 @@ __pycache__/
 # Windows noise
 Thumbs.db
 desktop.ini
+
+# Runtime-generated Magpie state
+/files/Magpie/cache/
+/files/Magpie/logs/
