@@ -1,0 +1,1100 @@
+from qtsymbols import *
+import os, functools, uuid, threading, NativeUtils
+from traceback import print_exc
+from myutils.config import (
+    savehook_new_list,
+    savehook_new_data,
+    savegametaged,
+    get_launchpath,
+    extradatas,
+    globalconfig,
+)
+from myutils.hwnd import clipboard_set_image
+from myutils.utils import (
+    get_time_stamp,
+    getimageformatlist,
+    targetmod,
+    getimagefilefilter,
+)
+from gui.specialwidget import stackedlist, shrinkableitem, shownumQPushButton
+from gui.usefulwidget import (
+    pixmapviewer,
+    makesubtab_lazy,
+    tabadd_lazy,
+    MyInputDialog,
+    request_delete_ok,
+    IconButton,
+)
+from gui.gamemanager.common import loadvisinternal
+from gui.gamemanager.setting import dialog_setting_game_internal
+from gui.gamemanager.common import (
+    loadrecentlist,
+    startgamecheck,
+    getreflist,
+    calculatetagidx,
+    opendirforgameuid,
+    getcachedimage,
+    CreateShortcutForUid,
+    getpixfunctionAlign,
+    addgamesingle,
+    addgamebatch,
+)
+from gui.dynalang import LAction, LLabel, LMenu
+
+
+class clickitem(QWidget):
+    focuschanged = pyqtSignal(bool, str)
+    doubleclicked = pyqtSignal(str)
+    globallashfocus = None
+
+    @classmethod
+    def clearfocus(cls):
+        try:  # 可能已被删除
+            if clickitem.globallashfocus:
+                clickitem.globallashfocus.focusOut()
+        except:
+            pass
+        clickitem.globallashfocus = None
+
+    def mouseDoubleClickEvent(self, e):
+        self.doubleclicked.emit(self.uid)
+
+    def click(self):
+        try:
+            self.bottommask.show()
+            if self != clickitem.globallashfocus:
+                clickitem.clearfocus()
+            clickitem.globallashfocus = self
+            self.focuschanged.emit(True, self.uid)
+        except:
+            print_exc()
+
+    def mousePressEvent(self, ev) -> None:
+        self.click()
+
+    def focusOut(self):
+        self.bottommask.hide()
+        self.focuschanged.emit(False, self.uid)
+
+    def resizeEvent(self, a0: QResizeEvent) -> None:
+        self.bottommask.resize(a0.size())
+        self.maskshowfileexists.resize(a0.size())
+        self.bottomline.resize(a0.size())
+        size = globalconfig["dialog_savegame_layout"]["listitemheight"]
+        margin = min(3, int(size / 15))
+        self.lay1.setContentsMargins(margin, margin, margin, margin)
+        self._.setFixedSize(QSize(size - 2 * margin, size - 2 * margin))
+        self._2.setFixedHeight(size)
+
+    def __init__(self, uid):
+        super().__init__()
+
+        self.uid = uid
+        self.lay = QHBoxLayout(self)
+        self.lay.setSpacing(0)
+        lay1 = QHBoxLayout()
+        self.lay1 = lay1
+        self.lay.setContentsMargins(0, 0, 0, 0)
+        self.maskshowfileexists = QLabel(self)
+        exists = os.path.exists(get_launchpath(uid))
+        self.maskshowfileexists.setObjectName("savegame_exists" + str(exists))
+        self.bottommask = QLabel(self)
+        self.bottommask.hide()
+        self.bottommask.setObjectName("savegame_onselectcolor1")
+        _ = QLabel(self)
+        _.setStyleSheet("background:transparent")
+        self.bottomline = _
+        _ = QLabel()
+        self._ = _
+        _.setScaledContents(True)
+        _.setStyleSheet("background:transparent")
+        for image in savehook_new_data[uid].get("imagepath_all", []):
+            fr = extradatas["imagefrom"].get(image)
+            if fr:
+                targetmod.get(fr).dispatchdownloadtask(image)
+        icon = getpixfunctionAlign(uid, small=True, iconfirst=True)
+        icon.setDevicePixelRatio(self.devicePixelRatioF())
+        _.setPixmap(icon)
+        lay1.addWidget(_)
+        self.lay.addLayout(lay1)
+        _ = QLabel(savehook_new_data[uid]["title"])
+        # _.setWordWrap(True)
+        _.setToolTip(savehook_new_data[uid]["title"])
+        self._2 = _
+        _.setObjectName("savegame_textfont2")
+        self.lay.addWidget(_)
+
+
+class fadeoutlabel(QWidget):
+    def setText(self, t):
+        self.text.setText(t)
+        self.resize(
+            self.width(),
+            max(self.btn.height() * 2, self.text.heightForWidth(self.text.width())),
+        )
+
+    def wheelEvent(self, e: QWheelEvent) -> None:
+        self.wheelto.wheelEvent(e)
+
+    def addimage(self):
+        f = QFileDialog.getOpenFileNames(filter=getimagefilefilter())
+        res = f[0]
+        self.parent1.addimages(res)
+
+    def delimage(self):
+        if not request_delete_ok(self, "9b524251-9639-478c-b3f9-2d254ef50084"):
+            return
+        self.parent1.removecurrent(False)
+
+    def __init__(self, p, wheelto: QWidget, parent: "pixwrapper"):
+        super().__init__(p)
+        self.parent1 = parent
+        l = QHBoxLayout(self)
+        l.setContentsMargins(0, 0, 0, 0)
+        l.setSpacing(0)
+        self.text = QLabel()
+        self.text.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.text.setScaledContents(True)
+        l.addWidget(self.text)
+        hb = QVBoxLayout()
+        hb.setContentsMargins(0, 0, 0, 0)
+        hb.setSpacing(0)
+        l.addLayout(hb)
+        self.btn = IconButton("fa.plus", tips="添加图片")
+        self.xbtn = IconButton("fa.times", tips="删除图片")
+        self.btn.clicked.connect(self.addimage)
+        self.xbtn.clicked.connect(self.delimage)
+        hb.addWidget(self.btn)
+        hb.addWidget(self.xbtn)
+        self.wheelto = wheelto
+        self.text.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.text.customContextMenuRequested.connect(self.showmenu)
+        effect = QGraphicsOpacityEffect(self)
+        effect.setOpacity(0)
+        self.setGraphicsEffect(effect)
+        self.effect = effect
+        self.setStyleSheet("""QLabel{background-color: rgba(255,255,255, 0);}""")
+        self.animation = QPropertyAnimation(effect, b"opacity")
+        self.animation.setDuration(2000)
+        self.animation.setStartValue(1.0)
+        self.animation.setEndValue(0.0)
+        self.animation.setDirection(QPropertyAnimation.Direction.Forward)
+        self.setText("")
+
+    def enterEvent(self, a0):
+        self.animation.stop()
+        self.effect.setOpacity(1)
+        return super().enterEvent(a0)
+
+    def leaveEvent(self, a0):
+        self.animation.start()
+        return super().leaveEvent(a0)
+
+    def showmenu(self, _):
+        t = self.text.text()
+        if not t:
+            return
+        menu = QMenu(self)
+        copy = LAction("复制", menu)
+        menu.addAction(copy)
+
+        action = menu.exec(QCursor.pos())
+        if action == copy:
+            NativeUtils.ClipBoard.text = self.text.text()
+
+
+PathRole = Qt.ItemDataRole.UserRole + 1
+ImageRequestedRole = PathRole + 1
+
+
+class ImageDelegate(QStyledItemDelegate):
+
+    def initStyleOption(self, opt: QStyleOptionViewItem, index: QModelIndex):
+        super().initStyleOption(opt, index)
+        if not index.data(ImageRequestedRole):
+            opt.features |= QStyleOptionViewItem.ViewItemFeature.HasDecoration
+            opt.decorationSize = QSize(100, 100)
+
+
+class previewimages(QListWidget):
+    changepixmappath = pyqtSignal(str)
+    removepath = pyqtSignal(str)
+
+    def wheelEvent(self, event: QWheelEvent):
+        if self.flow() == QListView.Flow.LeftToRight:
+            h_bar = self.horizontalScrollBar()
+            if h_bar.isVisible():
+                delta = event.angleDelta().y()
+                new_value = h_bar.value() - delta
+                h_bar.setValue(new_value)
+                event.accept()
+                return
+        super().wheelEvent(event)
+
+    def __init__(self, p=None):
+        super(previewimages, self).__init__(p)
+        self.setObjectName("NOBORDER")
+        self.imageDelegate = ImageDelegate(self)
+        self.setItemDelegate(self.imageDelegate)
+        self.lock = threading.Lock()
+        self.loadTimer = QTimer(interval=25, timeout=self.loadImage)
+        self.loadTimer.start()
+        self.currentRowChanged.connect(self._visidx)
+
+        self.setDragEnabled(True)
+        self.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def loadImage(self):
+        try:
+            start = self.indexAt(self.viewport().rect().topLeft()).row()
+            end = self.indexAt(self.viewport().rect().bottomRight()).row()
+            if start < 0:
+                return
+            with self.lock:
+                model = self.model()
+                if end < 0:
+                    end = model.rowCount()
+                for row in range(start, end + 1):
+                    index = model.index(row, 0)
+                    if not index.data(ImageRequestedRole):
+                        self.model().setData(index, True, ImageRequestedRole)
+                        image = getcachedimage(index.data(PathRole), True)
+                        item = self.itemFromIndex(index)
+                        if not item:
+                            continue
+                        if image.isNull():
+                            item.setHidden(True)
+                        else:
+                            if self.item(self.currentRow()).isHidden():
+                                self.setCurrentRow(row)
+                            item.setIcon(QIcon(image))
+
+        except:
+            print_exc()
+
+    def sethor(self, hor):
+        if hor:
+            self.setFlow(QListWidget.Flow.LeftToRight)
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+            self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        else:
+            self.setFlow(QListWidget.Flow.TopToBottom)
+            self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+
+        if hor:
+            self.setIconSize(QSize(self.height(), self.height()))
+        else:
+            self.setIconSize(QSize(self.width(), self.width()))
+
+    def sizeHint(self):
+        return QSize(100, 100)
+
+    def tolastnext(self, dx):
+        if self.count() == 0:
+            return self.setCurrentRow(-1)
+        first = (self.currentRow() + dx) % self.count()
+        test = first
+        while True:
+            if not self.item(test).isHidden():
+                self.setCurrentRow(test)
+                break
+            test = (test + dx) % self.count()
+            if test == first:
+                break
+
+    def dumppaths(self):
+        nlst = []
+        for i in range(self.model().rowCount()):
+            nlst.append(self.model().data(self.model().index(i, 0), PathRole))
+        return nlst
+
+    def additems(self, paths, clear=True, insert=False):
+        self.blockSignals(True)
+        if clear:
+            self.clear()
+        first = None
+        for path in paths:
+            item = QListWidgetItem()
+            if first is None:
+                first = item
+            item.setData(PathRole, path)
+            item.setData(ImageRequestedRole, False)
+            if insert:
+                self.insertItem(self.currentRow() + 1, item)
+            else:
+                self.addItem(item)
+        self.blockSignals(False)
+        if first:
+            self.setCurrentItem(first)
+
+    def setpixmaps(self, paths: list, currentpath):
+        self.setCurrentRow(-1)
+        self.additems(paths)
+        pixmapi = 0
+        if currentpath in paths:
+            pixmapi = paths.index(currentpath)
+        self.setCurrentRow(pixmapi)
+
+    def _visidx(self, _):
+        item = self.currentItem()
+        if item is None:
+            pixmap_ = None
+        else:
+            pixmap_ = item.data(PathRole)
+        self.changepixmappath.emit(pixmap_)
+
+    def removecurrent(self, delfile):
+        idx = self.currentRow()
+        item = self.currentItem()
+        if item is None:
+            return
+        path = item.data(PathRole)
+        self.removepath.emit(path)
+        self.takeItem(idx)
+        if delfile:
+            try:
+                os.remove(extradatas["localedpath"].get(path, path))
+            except:
+                pass
+
+    def resizeEvent(self, e: QResizeEvent):
+        if self.flow() == QListView.Flow.LeftToRight:
+            self.setIconSize(QSize(self.height(), self.height()))
+        else:
+            self.setIconSize(QSize(self.width(), self.width()))
+        return super().resizeEvent(e)
+
+
+class hoverbtn(LLabel):
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, a0: QMouseEvent) -> None:
+        if a0.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        return super().mousePressEvent(a0)
+
+    def __init__(self, *argc):
+        super().__init__(*argc)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def resizeEvent(self, e):
+        style = r"""QLabel{
+                background: transparent; 
+                border-radius:0;
+                font-size: %spx;
+                color:transparent; 
+            }
+            QLabel:hover{
+                background-color: rgba(255,255,255,0.5); 
+                color:black;
+            }""" % (
+            min(self.height(), self.width()) // 3
+        )
+        self.setStyleSheet(style)
+        super().resizeEvent(e)
+
+
+class viewpixmap_x(QWidget):
+    tolastnext = pyqtSignal(int)
+    startgame = pyqtSignal()
+
+    def sizeHint(self):
+        return QSize(400, 400)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.pixmapviewer = pixmapviewer(self)
+        self.pixmapviewer.tolastnext.connect(self.tolastnext)
+        self.bottombtn = hoverbtn("开始游戏", self)
+        self.bottombtn.clicked.connect(self.startgame)
+        self.infoview = fadeoutlabel(self, self.pixmapviewer, parent)
+        self.currentimage = None
+
+    def resizeEvent(self, e: QResizeEvent):
+        self.pixmapviewer.resize(e.size())
+        self.infoview.resize(e.size().width(), self.infoview.height())
+        self.bottombtn.setGeometry(
+            e.size().width() // 5,
+            7 * e.size().height() // 10,
+            3 * e.size().width() // 5,
+            3 * e.size().height() // 10,
+        )
+        super().resizeEvent(e)
+
+    def changepixmappath(self, path):
+        t = path
+        self.currentimage = path
+        try:
+            if not os.path.isfile(extradatas["localedpath"].get(path, path)):
+                raise Exception()
+            t += "\n" + get_time_stamp(
+                ct=os.path.getctime(extradatas["localedpath"].get(path, path)), ms=False
+            )
+        except:
+            pass
+
+        self.infoview.setText(t)
+        if not path:
+            pixmap = QPixmap()
+        else:
+            pixmap = QPixmap.fromImage(
+                QImage(extradatas["localedpath"].get(path, path))
+            )
+        self.pixmapviewer.showpixmap(pixmap)
+
+
+class pixwrapper(QSplitter):
+    startgame = pyqtSignal()
+
+    def keyPressEvent(self, e: QKeyEvent):
+        if e.key() == Qt.Key.Key_Delete:
+            self.removecurrent(False)
+        elif e.key() == Qt.Key.Key_Left:
+            self.previewimages.tolastnext(-1)
+        elif e.key() == Qt.Key.Key_Right:
+            self.previewimages.tolastnext(1)
+        elif e.key() == Qt.Key.Key_Down:
+            self.previewimages.tolastnext(1)
+        elif e.key() == Qt.Key.Key_Up:
+            self.previewimages.tolastnext(-1)
+        elif e.key() == Qt.Key.Key_Return:
+            startgamecheck(
+                self.ref,
+                getreflist(self.ref.reftagid),
+                self.ref.currentfocusuid,
+            )
+        return super().keyPressEvent(e)
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent):
+        files = [u.toLocalFile() for u in event.mimeData().urls()]
+        newf = []
+        sups = getimageformatlist()
+        for f in files:
+            ext = os.path.splitext(f)[1]
+            if ext.lower()[1:] not in sups:
+                continue
+            newf.append(f)
+        if not newf:
+            return
+        self.addimages(newf)
+
+    def addimages(self, files):
+        newf = []
+        for f in files:
+            if f in savehook_new_data[self.k].get("imagepath_all", []):
+                continue
+            newf.append(f)
+        if not newf:
+            return
+        if "imagepath_all" not in savehook_new_data[self.k]:
+            savehook_new_data[self.k]["imagepath_all"] = []
+        self.previewimages.additems(newf, clear=False, insert=True)
+        self._rowsMoved()
+
+    def _rowsMoved(self):
+        lst: list = savehook_new_data[self.k]["imagepath_all"]
+        lst.clear()
+        lst.extend(self.previewimages.dumppaths())
+
+    def setrank(self, rank):
+        if rank:
+            self.addWidget(self.pixview)
+            self.addWidget(self.previewimages)
+        else:
+            self.addWidget(self.previewimages)
+            self.addWidget(self.pixview)
+
+    def sethor(self, hor):
+        if hor:
+
+            self.setOrientation(Qt.Orientation.Vertical)
+        else:
+
+            self.setOrientation(Qt.Orientation.Horizontal)
+        self.previewimages.sethor(hor)
+
+    def __init__(self, p: "dialog_savedgame_v3") -> None:
+        super().__init__(p)
+        self.setObjectName("NOBORDER")
+        self.ref = p
+        self.setAcceptDrops(True)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        rank = (globalconfig["viewlistpos"] // 2) == 0
+        hor = (globalconfig["viewlistpos"] % 2) == 0
+
+        self.previewimages = previewimages(self)
+        self.previewimages.model().rowsMoved.connect(self._rowsMoved)
+        self.pixview = viewpixmap_x(self)
+        self.pixview.startgame.connect(self.startgame)
+        self.setHandleWidth(1)
+        self.setrank(rank)
+        self.sethor(hor)
+        self.pixview.tolastnext.connect(self.previewimages.tolastnext)
+        self.previewimages.changepixmappath.connect(self.changepixmappath)
+        self.previewimages.removepath.connect(self.removepath)
+        self.k = None
+        self.removecurrent = self.previewimages.removecurrent
+
+        self.previewimages.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.previewimages.customContextMenuRequested.connect(
+            functools.partial(self.menu, True)
+        )
+        self.pixview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.pixview.customContextMenuRequested.connect(
+            functools.partial(self.menu, False)
+        )
+
+    def menu(self, _1, _):
+        menu = QMenu(self)
+        setimage = LAction("设为封面", menu)
+        curr = savehook_new_data[self.k].get("currentvisimage")
+        curricon = savehook_new_data[self.k].get("currenticon")
+        seticon = LAction("设为图标", menu)
+        seticon.setCheckable(True)
+        seticon.setChecked(curr == curricon)
+        deleteimage = LAction("删除图片", menu)
+        copyimage = LAction("复制图片", menu)
+        deleteimage_x = LAction("删除图片文件", menu)
+        sxzy = tuple(LAction(x) for x in "下右上左")
+        pos = LMenu("位置", menu)
+        pos.addActions(sxzy)
+        for i, _ in enumerate(sxzy):
+            _.setCheckable(True)
+            _.setChecked(i == globalconfig["viewlistpos"])
+        if curr and os.path.exists(extradatas["localedpath"].get(curr, curr)):
+            menu.addAction(setimage)
+            menu.addAction(seticon)
+            menu.addAction(copyimage)
+            menu.addAction(deleteimage)
+            menu.addAction(deleteimage_x)
+        if _1:
+            menu.addSeparator()
+            menu.addMenu(pos)
+        action = menu.exec(QCursor.pos())
+        if action == deleteimage:
+            if not request_delete_ok(self, "9b524251-9639-478c-b3f9-2d254ef50084"):
+                return
+            self.removecurrent(False)
+        elif copyimage == action:
+            clipboard_set_image(extradatas["localedpath"].get(curr, curr))
+        elif action == deleteimage_x:
+            if not request_delete_ok(self, "d836ae43-b895-46e1-be0b-949dd5e2d4de"):
+                return
+            self.removecurrent(True)
+        elif action in sxzy:
+            self.switchpos(sxzy.index(action))
+
+        elif action == setimage:
+            savehook_new_data[self.k]["currentmainimage"] = curr
+        elif action == seticon:
+            if curr == curricon:
+                savehook_new_data[self.k].pop("currenticon")
+            else:
+                savehook_new_data[self.k]["currenticon"] = curr
+
+    def switchpos(self, pos):
+        globalconfig["viewlistpos"] = pos
+        rank = (globalconfig["viewlistpos"] // 2) == 0
+        hor = (globalconfig["viewlistpos"] % 2) == 0
+        self.setrank(rank)
+        self.sethor(hor)
+
+    def removepath(self, path):
+        lst: list = savehook_new_data[self.k].get("imagepath_all", [])
+        lst.pop(lst.index(path))
+
+    def changepixmappath(self, path):
+        if path:
+            savehook_new_data[self.k]["currentvisimage"] = path
+        self.pixview.changepixmappath(path)
+
+    def setpix(self, k):
+        self.k = k
+        pixmaps = savehook_new_data[k].get("imagepath_all", []).copy()
+        self.previewimages.setpixmaps(
+            pixmaps, savehook_new_data[k].get("currentvisimage")
+        )
+        self.pixview.bottombtn.setVisible(os.path.exists(get_launchpath(k)))
+
+
+class dialog_savedgame_v3(QSplitter):
+    def deleteLater(self):
+
+        if not isqt5:
+            try:
+                self.fuckqt6.fuckcombo.setEditable(False)
+            except:
+                pass
+        super().deleteLater()
+
+    def viewitem(self, k):
+        try:
+            self.pixview.setpix(k)
+            self.currentfocusuid = k
+            currvis = self.righttop.currentIndex()
+            if self.righttop.count() > 1:
+                self.righttop.removeTab(1)
+
+            def __(v: QLayout):
+                _ = dialog_setting_game_internal(
+                    self, k, keepindexobject=self.keepindexobject
+                )
+                self.fuckqt6 = _
+                v.addWidget(_)
+
+            tabadd_lazy(self.righttop, "_设置_", __)
+            self.righttop.setCurrentIndex(currvis)
+        except:
+            print_exc()
+
+    def itemfocuschanged(self, reftagid, b, k):
+
+        self.reftagid = reftagid
+        if b:
+            self.currentfocusuid = k
+        else:
+            self.currentfocusuid = None
+
+        if self.currentfocusuid:
+            self.viewitem(k)
+
+    def delayitemcreater(self, k, select, reftagid, reflist):
+
+        item = clickitem(k)
+        item.doubleclicked.connect(functools.partial(startgamecheck, self, reflist))
+        item.focuschanged.connect(functools.partial(self.itemfocuschanged, reftagid))
+        if select:
+            item.click()
+        return item
+
+    def newline(self, res):
+        self.reallist[self.reftagid].insert(0, res)
+        group = self.stack.w(calculatetagidx(self.reftagid))
+        group.insertw(
+            0,
+            functools.partial(
+                self.delayitemcreater,
+                res,
+                True,
+                self.reftagid,
+                getreflist(self.reftagid),
+            ),
+        )
+        group.button().setnum(len(self.reallist[self.reftagid]))
+        self.stack.directshow()
+
+    def stack_showmenu(self, p):
+        menu = QMenu(self)
+
+        addlist = LAction("创建列表", menu)
+        startgame = LAction("开始游戏", menu)
+        delgame = LAction("删除游戏", menu)
+        opendir = LAction("打开目录", menu)
+        createlnk = LAction("创建快捷方式", menu)
+        if not self.currentfocusuid:
+
+            menu.addAction(addlist)
+        else:
+            exists = os.path.exists(get_launchpath(self.currentfocusuid))
+            lc = get_launchpath(self.currentfocusuid)
+            exists = os.path.exists(lc)
+            if exists:
+                menu.addAction(startgame)
+                menu.addAction(opendir)
+                menu.addAction(createlnk)
+            elif os.path.exists(os.path.dirname(lc)):
+                menu.addAction(opendir)
+
+            if self.reftagid not in (1,):
+                menu.addAction(delgame)
+            menu.addSeparator()
+            __vis, __uid = loadvisinternal(
+                True, self.reftagid, recent=False, global_=False
+            )
+            if __uid:
+                addtolist = LMenu("添加到列表", menu)
+                menu.addMenu(addtolist)
+                for _ in range(len(__vis)):
+                    a = LAction(__vis[_], addtolist)
+                    a.setData(__uid[_])
+                    addtolist.addAction(a)
+
+        action = menu.exec(QCursor.pos())
+        if action == startgame:
+            startgamecheck(self, getreflist(self.reftagid), self.currentfocusuid)
+        elif addlist == action:
+
+            self.createlist(True, None)
+
+        elif action == delgame:
+            self.shanchuyouxi()
+        elif action == opendir:
+            self.clicked4()
+        elif action == createlnk:
+            CreateShortcutForUid(self.currentfocusuid)
+        elif action:  # addtolist
+            __uid = action.data()
+            if __uid:
+                self.addtolistcallback(__uid, self.currentfocusuid)
+
+    def addtolistcallback(self, uid, gameuid):
+
+        __save = self.reftagid
+        self.reftagid = uid
+
+        if gameuid not in getreflist(self.reftagid):
+            getreflist(self.reftagid).insert(0, gameuid)
+            self.newline(gameuid)
+        else:
+            idx = getreflist(self.reftagid).index(gameuid)
+            getreflist(self.reftagid).insert(0, getreflist(self.reftagid).pop(idx))
+            self.stack.w(calculatetagidx(self.reftagid)).torank1(idx)
+        self.reftagid = __save
+
+    def directshow(self):
+        self.stack.directshow()
+
+    def callexists(self, _):
+        pass
+
+    def callchange(self):
+        self.stack.setheight(
+            globalconfig["dialog_savegame_layout"]["listitemheight"] + 1
+        )
+        self.stack.directshow_1()
+
+    def setstyle(self):
+        key = "savegame_textfont2"
+        fontstring = globalconfig.get(key, "")
+        _style = """background-color: rgba(255,255,255, 0);"""
+        if fontstring:
+            _f = QFont()
+            _f.fromString(fontstring)
+            _style += "font-size:{}pt;".format(_f.pointSize())
+            _style += 'font-family:"{}";'.format(_f.family())
+        style = "#{}{{ {} }}".format(key, _style)
+
+        style += "#savegame_existsTrue{{background-color:{};}}".format(
+            globalconfig["dialog_savegame_layout"]["backcolor2"]
+        )
+        style += "#savegame_existsFalse{{background-color:{};}}".format(
+            globalconfig["dialog_savegame_layout"]["onfilenoexistscolor2"]
+        )
+        style += "#savegame_onselectcolor1{{background-color: {};}}".format(
+            globalconfig["dialog_savegame_layout"]["onselectcolor2"]
+        )
+        self.stack.setStyleSheet(style)
+
+    def movefocus(self, dx):
+        uid = self.currentfocusuid
+        idx1 = self.reallist[self.reftagid].index(uid)
+        idx2 = (idx1 + dx) % len(self.reallist[self.reftagid])
+        group0 = self.stack.w(calculatetagidx(self.reftagid))
+        if idx1 == 0 and dx == -1:
+            self.stack.verticalScrollBar().setValue(
+                self.stack.verticalScrollBar().maximum()
+            )
+        else:
+            try:
+                self.stack.ensureWidgetVisible(group0.w(idx2))
+            except:
+                pass
+        try:
+            group0.w(idx2).click()
+        except:
+            pass
+
+    def __init__(self, parent) -> None:
+        super().__init__(parent)
+        self.currentfocusuid = None
+        self.reftagid: str = None
+        self.reallist: "dict[str,list]" = {}
+        self.keepindexobject = {}
+
+        class stackedlist11(stackedlist):
+            def __init__(self_, ref: dialog_savedgame_v3):
+                super().__init__()
+                self_.ref = ref
+
+            def keyPressEvent(self_, e: QKeyEvent):
+                if self_.ref.currentfocusuid:
+                    if e.key() == Qt.Key.Key_Return:
+                        startgamecheck(
+                            self_.ref,
+                            getreflist(self_.ref.reftagid),
+                            self_.ref.currentfocusuid,
+                        )
+                    elif e.key() == Qt.Key.Key_Delete:
+                        self_.ref.shanchuyouxi()
+                    elif e.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                        offset = 1 if e.key() == Qt.Key.Key_Down else -1
+                        if e.modifiers() == Qt.KeyboardModifier.ControlModifier:
+                            self_.ref.moverank(offset)
+                        else:
+                            self_.ref.movefocus(offset)
+                        return e.ignore()
+                super().keyPressEvent(e)
+
+        self.stack = stackedlist11(self)
+        self.stack.setheight(
+            globalconfig["dialog_savegame_layout"]["listitemheight"] + 1
+        )
+        self.stack.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.stack.customContextMenuRequested.connect(self.stack_showmenu)
+
+        self.stack.bgclicked.connect(clickitem.clearfocus)
+        self.stack.setObjectName("NOBORDER")
+        self.setstyle()
+
+        self.setHandleWidth(1)
+        self.setStyleSheet("QSplitter::handle {margin:0}")
+
+        self.addWidget(self.stack)
+        self.righttop = makesubtab_lazy()
+        self.righttop.currentChanged.connect(
+            lambda idx: (
+                self.righttop.setStyleSheet(
+                    "QTabWidget::pane{border:0;margin:0;padding:0;}" if idx == 0 else ""
+                ),
+            )
+        )
+        self.pixview = pixwrapper(self)
+        self.pixview.startgame.connect(
+            lambda: startgamecheck(
+                self, getreflist(self.reftagid), self.currentfocusuid
+            )
+        )
+        self.righttop.addTab(self.pixview, "_画廊_")
+        self.addWidget(self.righttop)
+        self.setObjectName("NOBORDER")
+
+        def __(_):
+            globalconfig["dialog_savegame_layout"]["listitemwidth_2"] = self.sizes()
+
+        self.setSizes(globalconfig["dialog_savegame_layout"]["listitemwidth_2"])
+        self.splitterMoved.connect(__)
+        self.setStretchFactor(0, 0)
+        self.setStretchFactor(1, 1)
+
+        isfirst = True
+        for i, tag in enumerate(savegametaged):
+            if tag is None:
+                title = "所有游戏"
+                lst = savehook_new_list
+                tagid = None
+                opened = globalconfig.get("global_list_opened", True)
+            elif tag == 1:
+                title = "最近游戏"
+                lst = loadrecentlist()
+                tagid = 1
+                opened = globalconfig.get("recent_list_opened", True)
+            else:
+                lst = tag["games"]
+                title = "[[{}]]".format(tag["title"])
+                tagid = tag["uid"]
+                opened = tag.get("opened", True)
+            group0, btn = self.createtaglist(self.stack, title, tagid, opened)
+            self.stack.insertw(i, group0)
+            rowreal = 0
+            for row, k in enumerate(lst):
+                if globalconfig["hide_not_exists"]:
+                    if not os.path.exists(get_launchpath(k)):
+                        continue
+                self.reallist[tagid].append(k)
+                if opened and isfirst and (rowreal == 0):
+                    vis = True
+                    isfirst = False
+                else:
+                    vis = False
+                group0.insertw(
+                    rowreal,
+                    functools.partial(self.delayitemcreater, k, vis, tagid, lst),
+                )
+
+                rowreal += 1
+            btn.setnum(rowreal)
+
+    def taglistrerank(self, tagid, dx):
+        idx1 = calculatetagidx(tagid)
+
+        idx2 = (idx1 + dx) % len(savegametaged)
+        savegametaged.insert(idx2, savegametaged.pop(idx1))
+        self.stack.switchidx(idx1, idx2)
+
+    def tagbuttonmenu(self, tagid):
+        self.currentfocusuid = None
+        self.reftagid = tagid
+        menu = QMenu(self)
+        editname = LAction("修改列表名称", menu)
+        addlist = LAction("创建列表", menu)
+        dellist = LAction("删除列表", menu)
+        Upaction = LAction("上移", menu)
+        Downaction = LAction("下移", menu)
+        addgame = LAction("添加游戏", menu)
+        batchadd = LAction("批量添加", menu)
+        menu.addAction(Upaction)
+        menu.addAction(Downaction)
+        menu.addSeparator()
+        if tagid not in (None, 1):
+            menu.addAction(editname)
+        menu.addAction(addlist)
+        if tagid not in (None, 1):
+            menu.addAction(dellist)
+        menu.addSeparator()
+        if tagid not in (1,):
+            menu.addAction(addgame)
+            menu.addAction(batchadd)
+
+        action = menu.exec(QCursor.pos())
+        if action == addgame:
+            self.clicked3()
+        elif action == batchadd:
+            self.clicked3_batch()
+        elif action == Upaction:
+            self.taglistrerank(tagid, -1)
+        elif action == Downaction:
+            self.taglistrerank(tagid, 1)
+        elif action == editname or action == addlist:
+            self.createlist(action == addlist, tagid)
+
+        elif action == dellist:
+            i = calculatetagidx(tagid)
+            savegametaged.pop(i)
+            self.stack.popw(i)
+            self.reallist.pop(tagid)
+
+    def createlist(self, create, tagid):
+
+        def cb(title):
+            if not title:
+                return
+            i = calculatetagidx(tagid)
+            if create:
+                tag = {
+                    "title": title,
+                    "games": [],
+                    "uid": str(uuid.uuid4()),
+                    "opened": True,
+                }
+                savegametaged.insert(i, tag)
+                group0, btn = self.createtaglist(self.stack, title, tag["uid"], True)
+                self.stack.insertw(i, group0)
+            else:
+                self.stack.w(i).settitle(title)
+                savegametaged[i]["title"] = title
+
+        __ = "" if create else savegametaged[calculatetagidx(tagid)]["title"]
+        cb(
+            MyInputDialog(
+                self,
+                "创建列表" if create else "修改列表名称",
+                "名称",
+                __,
+            )
+        )
+
+    def createtaglist(self, p, title, tagid, opened):
+
+        self.reallist[tagid] = []
+        _btn = shownumQPushButton(title)
+        _btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        _btn.clicked.connect(functools.partial(self._revertoepn, tagid))
+        _btn.customContextMenuRequested.connect(
+            functools.partial(self.tagbuttonmenu, tagid)
+        )
+        return shrinkableitem(p, _btn, opened), _btn
+
+    def _revertoepn(self, tagid):
+        item = savegametaged[calculatetagidx(tagid)]
+        if item is None:
+            globalconfig["global_list_opened"] = not globalconfig.get(
+                "global_list_opened", True
+            )
+        elif item == 1:
+            globalconfig["recent_list_opened"] = not globalconfig.get(
+                "recent_list_opened", True
+            )
+        else:
+            savegametaged[calculatetagidx(tagid)]["opened"] = not savegametaged[
+                calculatetagidx(tagid)
+            ]["opened"]
+
+    def moverank(self, dx):
+        if self.reftagid == 1:
+            return
+        uid = self.currentfocusuid
+        idx1 = self.reallist[self.reftagid].index(uid)
+        idx2 = (idx1 + dx) % len(self.reallist[self.reftagid])
+        uid2 = self.reallist[self.reftagid][idx2]
+        self.reallist[self.reftagid].insert(
+            idx2, self.reallist[self.reftagid].pop(idx1)
+        )
+
+        self.stack.w(calculatetagidx(self.reftagid)).switchidx(idx1, idx2)
+        try:
+            self.stack.ensureWidgetVisible(
+                self.stack.w(calculatetagidx(self.reftagid)).w(idx2)
+            )
+        except:
+            pass
+        idx1 = getreflist(self.reftagid).index(uid)
+        idx2 = getreflist(self.reftagid).index(uid2)
+        getreflist(self.reftagid).insert(idx2, getreflist(self.reftagid).pop(idx1))
+
+    def shanchuyouxi(self):
+        if not self.currentfocusuid:
+            return
+        if not request_delete_ok(self, "bf4aa76a-41a5-4b07-a095-0c34c616ed2d"):
+            return
+        try:
+            uid = self.currentfocusuid
+            idx2 = getreflist(self.reftagid).index(uid)
+            getreflist(self.reftagid).pop(idx2)
+
+            idx2 = self.reallist[self.reftagid].index(uid)
+            self.reallist[self.reftagid].pop(idx2)
+            clickitem.clearfocus()
+            group0 = self.stack.w(calculatetagidx(self.reftagid))
+            group0.button().setnum(len(self.reallist[self.reftagid]))
+            group0.popw(idx2)
+            try:
+                group0.w(idx2).click()
+            except:
+                group0.w(idx2 - 1).click()
+
+        except:
+            print_exc()
+
+    def clicked4(self):
+        opendirforgameuid(self.currentfocusuid)
+
+    def addgame(self, uid):
+        if uid not in self.reallist[self.reftagid]:
+            self.newline(uid)
+        else:
+            idx = self.reallist[self.reftagid].index(uid)
+            self.reallist[self.reftagid].pop(idx)
+            self.reallist[self.reftagid].insert(0, uid)
+            self.stack.w(calculatetagidx(self.reftagid)).torank1(idx)
+        self.stack.w(calculatetagidx(self.reftagid)).button().setnum(
+            len(self.reallist[self.reftagid])
+        )
+
+    def clicked3_batch(self):
+        addgamebatch(self.addgame, getreflist(self.reftagid))
+
+    def clicked3(self):
+        addgamesingle(self, self.addgame, getreflist(self.reftagid))
+
+    def clicked(self):
+        startgamecheck(self, getreflist(self.reftagid), self.currentfocusuid)

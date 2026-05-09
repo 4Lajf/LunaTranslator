@@ -1,0 +1,22 @@
+# Local runtime data
+/cache/
+/chrome_cache/
+/translation_record/
+/userconfig/
+*.log
+
+# Source sync repo and local backups
+/LunaTranslator_repo/
+/LunaTranslator_backup_*/
+/LunaTranslator_junction_backup_*/
+/sync-luna-fork.bat
+/sync-luna-fork.ps1
+
+# Python/cache noise
+__pycache__/
+*.pyc
+*.pyo
+
+# Windows noise
+Thumbs.db
+desktop.ini

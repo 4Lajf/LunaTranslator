@@ -1,0 +1,15 @@
+* text=auto
+
+*.exe -text
+*.dll -text
+*.pyd -text
+*.zip -text
+*.7z -text
+*.bin -text
+*.dat -text
+*.onnx -text
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.webp -text
+*.ttf -text

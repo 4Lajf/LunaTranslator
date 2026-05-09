@@ -1,0 +1,186 @@
+<style id="origincontroller">
+</style>
+<style id="transcontroller">
+</style>
+<style id="apinamecontroller">
+</style>
+<style id="timecontroller">
+</style>
+<style id="fontcontroller">
+</style>
+<div id="rootele" style="white-space: pre-wrap;"></div>
+<style>
+    @media (prefers-color-scheme: dark) {
+        :root {
+            color-scheme: dark;
+        }
+
+        body {
+            background-color: rgb(44, 44, 44);
+            color: white;
+        }
+    }
+</style>
+<script>
+    function setfont(font) {
+        document.getElementById('fontcontroller').innerHTML = decodeURIComponent(font);
+    }
+    function showhideorigin(show) {
+        let css = ['.origin{   display: none;    }', '.origin{}'][show]
+        document.getElementById('origincontroller').innerHTML = css;
+    }
+    function showhidetrans(show) {
+        let css = ['.trans{   display: none;    }', '.trans{}'][show]
+        document.getElementById('transcontroller').innerHTML = css;
+    }
+    function showhidetransname(show) {
+        let css = ['.apiname{   display: none;    }', '.apiname{}'][show]
+        document.getElementById('apinamecontroller').innerHTML = css;
+    }
+    function showhidetime(show) {
+        let css = ['.gettime{   display: none;    }', '.gettime{}'][show]
+        document.getElementById('timecontroller').innerHTML = css;
+    }
+    function addbr() {
+        if (document.getElementById('rootele').innerHTML.length)
+            document.getElementById('rootele').appendChild(document.createElement('br'))
+    }
+    function clear() {
+        document.getElementById('rootele').innerHTML = ""
+    }
+    function formatFloatTimestamp(timestamp) {
+        // 1. 分离整数秒和小数毫秒
+        const seconds = Math.floor(timestamp); // 整数部分（秒）
+        const milliseconds = Math.floor((timestamp - seconds) * 1000); // 小数部分 → 毫秒（0-999）
+
+        // 2. 创建 Date 对象（注意：JavaScript 需要毫秒，所以乘以 1000）
+        const date = new Date(seconds * 1000);
+
+        // 3. 手动格式化各字段
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        const secondsStr = String(date.getSeconds()).padStart(2, '0');
+        const millisecondsStr = String(milliseconds).padStart(3, '0');
+
+        // 4. 组合结果
+        return `${year}-${month}-${day} ${hours}:${minutes}:${secondsStr}.${millisecondsStr}`;
+    }
+    function getnewsentence(time, sentence) {
+        let span = document.createElement('div')
+        let times = document.createElement('span')
+        times.innerText = formatFloatTimestamp(time) + " "
+        times.classList.add('gettime')
+        span.appendChild(times)
+        let sent = document.createElement('span')
+        sent.innerText = decodeURIComponent(sentence)
+        span.appendChild(sent)
+        span.classList.add('origin')
+        document.getElementById('rootele').appendChild(span)
+        scrollend()
+    }
+    const content_is_html_sig = 'LUNASHOWHTML'
+    function getnewtrans(time, api, sentence) {
+        let span = document.createElement('div')
+        let times = document.createElement('span')
+        times.innerText = formatFloatTimestamp(time) + " "
+        times.classList.add('gettime')
+        span.appendChild(times)
+        let apis = document.createElement('span')
+        apis.innerText = decodeURIComponent(api) + " "
+        apis.classList.add('apiname')
+        span.appendChild(apis)
+        let sent = document.createElement('span')
+        sentence = decodeURIComponent(sentence)
+        if (sentence.startsWith(content_is_html_sig))
+            sent.innerHTML = sentence.substr(content_is_html_sig.length)
+        else
+            sent.innerText = sentence
+        span.appendChild(sent)
+        span.classList.add('trans')
+        document.getElementById('rootele').appendChild(span)
+        scrollend()
+    }
+    const escapeHtml = (unsafe) => {
+        return unsafe.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#039;');
+    }
+    function fastinit(data) {
+        data = JSON.parse(decodeURIComponent(data))
+        let innerhtml = ""
+        data.forEach(line => {
+            if (line[0] == 0) {
+                if (innerhtml.length) {
+                    innerhtml += '<br>'
+                }
+                innerhtml += `<div class="origin"><span class="gettime">${escapeHtml(formatFloatTimestamp(line[1][0]))} </span><span>${escapeHtml(line[1][1])}</span></div>`
+            }
+            else if (line[0] == 1) {
+                let ts = line[1][2].startsWith(content_is_html_sig) ? line[1][2].substr(content_is_html_sig.length) : escapeHtml(line[1][2])
+                innerhtml += `<div class="trans"><span class="gettime">${escapeHtml(formatFloatTimestamp(line[1][0]))} </span><span class="apiname">${escapeHtml(line[1][1])} </span><span>${ts}</span></div>`
+            }
+        });
+        document.getElementById('rootele').innerHTML = innerhtml
+        scrollend()
+    }
+    function scrollend() {
+        window.scrollTo({
+            top: document.body.scrollHeight,
+            behavior: 'instant'
+        });
+    }
+</script>
+
+<script>
+
+    function __internalservice() {
+        if (window.LUNAJSObject)
+            return;
+        const scheme = window.location.protocol;
+        const wsUrl = ((scheme == 'http:') ? 'ws' : 'wss') + '://' + window.location.host + '/__internalservice/transhistws';
+        let webSocket = null;
+        let isConnect = false;
+        let rec = null;
+        function createWebSocket() {
+            try {
+                webSocket = new WebSocket(wsUrl);
+                initWebSocket();
+            } catch (e) {
+                reConnect();
+            }
+        }
+
+        function initWebSocket() {
+            webSocket.onopen = function (e) {
+                webSocket.send(JSON.stringify({ function: 'calllunaloadready' }))
+                isConnect = true;
+            };
+            webSocket.onclose = function (e) {
+                isConnect = false;
+                reConnect();
+            };
+            webSocket.onmessage = function (e) {
+                eval(e.data)
+            };
+            webSocket.onerror = function (e) {
+                isConnect = false;
+                reConnect();
+            };
+        }
+
+        function reConnect() {
+            if (isConnect) return;
+            if (rec) clearTimeout(rec);
+            rec = setTimeout(function () {
+                createWebSocket();
+            }, 1000);
+        }
+        createWebSocket()
+
+    };
+    if (window.LUNAJSObject)
+        LUNAJSObject.calllunaloadready()
+    else
+        __internalservice()
+</script>

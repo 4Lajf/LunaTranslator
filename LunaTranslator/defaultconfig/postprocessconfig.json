@@ -1,0 +1,149 @@
+{
+    "stringreplace": {
+        "use": false,
+        "name": "字符串替换",
+        "args": {
+            "internal": []
+        },
+        "isExUse": true
+    },
+    "_remove_non_shiftjis_char": {
+        "use": false,
+        "name": "过滤文本中的非日语字符集字符"
+    },
+    "_remove_control": {
+        "use": false,
+        "name": "过滤控制字符"
+    },
+    "_remove_symbo": {
+        "use": false,
+        "name": "过滤英文标点"
+    },
+    "_remove_not_in_ja_bracket": {
+        "use": false,
+        "name": "过滤「」以外的字符"
+    },
+    "_1": {
+        "use": false,
+        "name": "去除花括号{}",
+        "isExUse": true
+    },
+    "fulltohalf": {
+        "use": true,
+        "name": "Unicode正规化",
+        "isExUse": true,
+        "args": {
+            "type": "NFKC"
+        },
+        "argstype": {
+            "type": {
+                "type": "combo",
+                "name": "type",
+                "list": [
+                    "NFD",
+                    "NFC",
+                    "NFKD",
+                    "NFKC"
+                ],
+                "internal": [
+                    "NFD",
+                    "NFC",
+                    "NFKD",
+                    "NFKC"
+                ]
+            }
+        }
+    },
+    "lines_threshold_1": {
+        "use": false,
+        "name": "截取指定行数",
+        "args": {
+            "maxzishu": 1,
+            "cut_reverse": true
+        },
+        "argstype": {
+            "maxzishu": {
+                "name": "截取行数",
+                "type": "intspin",
+                "min": -99999999,
+                "max": 99999999
+            },
+            "cut_reverse": {
+                "name": "截取末尾",
+                "type": "switch"
+            }
+        }
+    },
+    "_2": {
+        "use": true,
+        "name": "HOOK_去除重复字符_AAAABBBBCCCC->ABC",
+        "args": {
+            "重复次数(若为1则自动分析去重)": 1,
+            "保持非重复字符": true
+        },
+        "argstype": {
+            "保持非重复字符": {
+                "type": "switch"
+            },
+            "重复次数(若为1则自动分析去重)": {
+                "type": "intspin",
+                "min": 1,
+                "max": 10000
+            }
+        },
+        "isHookOnly": true
+    },
+    "_3": {
+        "use": true,
+        "name": "HOOK_去除重复行_ABCDABCDABCD->ABCD",
+        "args": {
+            "重复次数(若为1则自动分析去重)": 1
+        },
+        "argstype": {
+            "重复次数(若为1则自动分析去重)": {
+                "type": "intspin",
+                "min": 1,
+                "max": 10000
+            }
+        },
+        "isHookOnly": true
+    },
+    "_3_2": {
+        "use": false,
+        "name": "HOOK_去除重复行_S1S1S1S2S2S2->S1S2",
+        "isHookOnly": true
+    },
+    "_4": {
+        "use": false,
+        "name": "过滤尖括号<>",
+        "isExUse": true
+    },
+    "_6EX": {
+        "use": false,
+        "name": "过滤换行符",
+        "isExUse": true
+    },
+    "_91": {
+        "use": false,
+        "name": "过滤数字"
+    },
+    "_92": {
+        "use": false,
+        "name": "过滤英文字母"
+    },
+    "_10": {
+        "use": false,
+        "name": "HOOK_去除重复行_ABCDBCDCDD->ABCD",
+        "isHookOnly": true
+    },
+    "_13EX": {
+        "use": false,
+        "name": "HOOK_去除重复行_AABABCABCD->ABCD",
+        "isHookOnly": true
+    },
+    "_11": {
+        "use": false,
+        "name": "自定义python处理",
+        "isExUse": true
+    }
+}

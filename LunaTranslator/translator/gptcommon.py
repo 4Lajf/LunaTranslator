@@ -1,0 +1,567 @@
+from translator.basetranslator import (
+    basetrans,
+    GptTextWithDict,
+    GptDict,
+    furigana_debug,
+)
+import json, requests, hmac, hashlib, NativeUtils, re, functools
+from datetime import datetime, timezone
+from myutils.utils import (
+    APIType,
+    common_list_models,
+    common_parse_normal_response,
+    common_create_gemini_request,
+    common_create_gpt_data,
+)
+from myutils.proxy import getproxy
+from language import Languages
+from gui.customparams import getcustombodyheaders
+
+
+def list_models(typename, regist: dict):
+    return common_list_models(
+        getproxy(("fanyi", typename)),
+        APIType(regist["API接口地址"]()),
+        regist.get("SECRET_KEY", lambda: "")().split("|")[0],
+    )
+
+
+def stream_event_parser(response: requests.Response):
+
+    for response_data in response.iter_lines(decode_unicode=True):
+        response_data = response_data.strip()
+        if not response_data:
+            continue
+        if not response_data.startswith("data: "):
+            continue
+        response_data = response_data[6:]
+        if response_data == "[DONE]":
+            break
+        try:
+            json_data = json.loads(response_data)
+        except:
+            raise Exception(response_data)
+        yield json_data
+
+
+def commonparseresponse_good(
+    response: requests.Response, hidethinking: bool, markdown2html: bool
+):
+    message = ""
+    thinkcnt = 0
+    isthinking = False
+    isreasoning_content = False
+    unsafethinkonce = True
+    for json_data in stream_event_parser(response):
+        try:
+            if len(json_data["choices"]) == 0:
+                continue
+            delta: dict = json_data["choices"][0].get("delta", {})
+            msg: str = delta.get("content", None)
+            reasoning_content: str = delta.get("reasoning_content", None)
+            if reasoning_content:
+                if hidethinking:
+                    isreasoning_content = True
+                    thinkcnt += len(reasoning_content)
+                    yield "\0"
+                    yield "thinking {} ...".format(thinkcnt)
+                else:
+                    yield reasoning_content
+            elif msg:
+                if isreasoning_content:
+                    isreasoning_content = False
+                    yield "\0"
+                if hidethinking and (msg.strip() == "<think>"):
+                    yield "thinking ..."
+                    isthinking = True
+                elif hidethinking and isthinking:
+                    if msg.strip() == "</think>":
+                        isthinking = False
+                        yield "\0"
+                    else:
+                        thinkcnt += len(msg)
+                        yield "\0"
+                        yield "thinking {} ...".format(thinkcnt)
+
+                else:
+                    # 有时，会没有<think>只有</think>比如使用prefill的时候。移除第一个</think>之前的内容
+                    if hidethinking and unsafethinkonce and (msg.strip() == "</think>"):
+                        isthinking = False
+                        message = ""
+                        unsafethinkonce = False
+                        yield "\0"
+                    elif hidethinking and (not message) and (not msg.strip()):
+                        # 跳过</think>后的\n
+                        pass
+                    else:
+                        message += msg
+                        if markdown2html:
+                            _msg = NativeUtils.Markdown2Html(message)
+                            yield "\0"
+                            yield "LUNASHOWHTML" + _msg
+                        else:
+                            yield msg
+            rs = json_data["choices"][0].get("finish_reason")
+            if rs and rs != "null":
+                break
+        except:
+            raise Exception(json_data)
+    return message
+
+
+def parseresponsegemini(response: requests.Response, markdown2html: bool):
+    line = ""
+    for __x in response.iter_lines(decode_unicode=True):
+        __x = __x.strip()
+        if not __x.startswith('"text":'):
+            continue
+        try:
+            __x = json.loads("{" + __x + "}")["text"]
+        except:
+            # gemini-3-flash 之后还有别的东西
+            continue
+        line += __x
+        if markdown2html:
+            _msg = NativeUtils.Markdown2Html(line)
+            yield "\0"
+            yield "LUNASHOWHTML" + _msg
+        else:
+            yield __x
+    return line
+
+
+def parseresponseclaude(response: requests.Response):
+    message = ""
+    for response_data in response.iter_lines(decode_unicode=True):
+        response_data = response_data.strip()
+        if not response_data:
+            continue
+        if response_data.startswith("data: "):
+            try:
+                json_data = json.loads(response_data[6:])
+                if json_data["type"] == "message_stop":
+                    break
+                elif json_data["type"] == "content_block_delta":
+                    msg = json_data["delta"]["text"]
+                    message += msg
+                elif json_data["type"] == "content_block_start":
+                    msg = json_data["content_block"]["text"]
+                    message += msg
+                else:
+                    continue
+            except:
+                raise Exception(response_data)
+            yield msg
+    return message
+
+
+def parseresponseQWENMT(response: requests.Response):
+    message = ""
+    for json_data in stream_event_parser(response):
+        try:
+            if len(json_data["choices"]) == 0:
+                continue
+            delta: dict = json_data["choices"][0].get("delta", {})
+            msg: str = delta.get("content", None)
+            if msg.startswith(message):
+                yield msg[len(message) :]
+            else:
+                yield "\0"
+                yield msg
+            message = msg
+            rs = json_data["choices"][0].get("finish_reason")
+            if rs and rs != "null":
+                break
+        except:
+            raise Exception(json_data)
+    return message
+
+
+def parsestreamresp(
+    apitype: APIType,
+    response: requests.Response,
+    hidethinking: bool,
+    markdown2html: bool,
+    model: str,
+):
+    if (response.status_code != 200) and (
+        not response.headers["Content-Type"].startswith("text/event-stream")
+    ):
+        # application/json
+        # text/html
+        raise Exception(response)
+    if apitype == APIType.gemini:
+        respmessage = yield from parseresponsegemini(response, markdown2html)
+    elif apitype == APIType.claude:
+        respmessage = yield from parseresponseclaude(response)
+    elif model.startswith("qwen-mt-") and apitype == APIType.aliyuncs:
+        respmessage = yield from parseresponseQWENMT(response)
+    else:
+        respmessage = yield from commonparseresponse_good(
+            response, hidethinking, markdown2html
+        )
+    return respmessage
+
+
+class qianfanIAM:
+
+    @staticmethod
+    def sign(access_key_id: str, secret_access_key: str):
+        now = datetime.now(timezone.utc)
+        canonical_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        sign_key_info = "bce-auth-v1/{}/{}/8640000".format(
+            access_key_id, canonical_time
+        )
+        sign_key = hmac.new(
+            secret_access_key.encode(), sign_key_info.encode(), hashlib.sha256
+        ).hexdigest()
+        string_to_sign = "GET\n/v1/BCE-BEARER/token\nexpireInSeconds=8640000\nhost:iam.bj.baidubce.com"
+        sign_result = hmac.new(
+            sign_key.encode(), string_to_sign.encode(), hashlib.sha256
+        ).hexdigest()
+        return "{}/host/{}".format(sign_key_info, sign_result)
+
+    @staticmethod
+    def getkey(ak: str, sk: str, proxy):
+        headers = {
+            "Host": "iam.bj.baidubce.com",
+            "Authorization": qianfanIAM.sign(ak, sk),
+        }
+        return requests.get(
+            "https://iam.bj.baidubce.com/v1/BCE-BEARER/token",
+            params={"expireInSeconds": 8640000},
+            headers=headers,
+            proxies=proxy,
+        ).json()["token"]
+
+
+def createheaders(apitype: APIType, curkey: str, maybeuse: dict, proxy, extra):
+    _ = {}
+    if curkey:
+        # 部分白嫖接口可以不填，填了反而报错
+        _.update({"Authorization": "Bearer " + curkey})
+    if apitype == APIType.azure:
+        _.update({"api-key": curkey})
+    elif (apitype == APIType.qianfan) and (":" in curkey):
+        if not maybeuse.get(curkey):
+            Access_Key, Secret_Key = curkey.split(":")
+            key = qianfanIAM.getkey(Access_Key, Secret_Key, proxy)
+            maybeuse[curkey] = key
+        _.update({"Authorization": "Bearer " + maybeuse[curkey]})
+    if extra:
+        _.update(extra)
+    return _
+
+
+class gptcommon(basetrans):
+    def langmap(self):
+        return Languages.createenglishlangmap()
+
+    def __init__(self, typename):
+        self.context = []
+        self.context_for_cache = []
+        self.context_for_cache_skipinter = 0
+        self.context_for_cache_skipinter_shouldmove = False
+        self.maybeuse = {}
+        super().__init__(typename)
+
+    def translate(self, query_2: GptTextWithDict):
+        self.checkempty("API接口地址")
+        if isinstance(query_2, str):
+            query_2 = GptTextWithDict(query_2)
+        extrabody, extraheader = getcustombodyheaders(
+            self.config.get("customparams"), **locals()
+        )
+        usingstream = self.config["流式输出"]
+        messages, query, query_1 = self.commoncreatemessages(query_2)
+        furigana_debug(
+            "LLM_REQUEST",
+            model=self.config.get("model", ""),
+            endpoint=self.config.get("API接口地址", ""),
+            sentence=query_1,
+            furigana=query_2.furigana,
+            named_terms=self.__extract_bracketed_named_terms(
+                query_2.rawtext or query_2.parsedtext or ""
+            ),
+            user_prompt=query,
+        )
+        apitype = APIType(self.config.get("API接口地址", ""))
+        if apitype == APIType.gemini:
+            response = self.request_gemini(apitype, messages, extrabody, extraheader)
+        elif apitype == APIType.gemini:
+            response = self.req_claude(
+                messages, extrabody, extraheader, self.config.get("cachecontext", False)
+            )
+        else:
+            headers = createheaders(
+                apitype,
+                self.multiapikeycurrent["SECRET_KEY"],
+                self.maybeuse,
+                self.proxy,
+                extraheader,
+            )
+            _json = common_create_gpt_data(
+                self.config, self.__parse_qwen_mt_turbo(apitype, messages), extrabody
+            )
+            response = self.proxysession.post(
+                apitype.finalurl(), headers=headers, json=_json, stream=usingstream
+            )
+        hidethinking = self.config.get("hidethinking", False)
+        markdown2html = self.config.get("markdown2html", False)
+        if usingstream:
+            respmessage = yield from parsestreamresp(
+                apitype, response, hidethinking, markdown2html, self.config["model"]
+            )
+        else:
+            respmessage = common_parse_normal_response(
+                response, apitype, hidethinking=hidethinking
+            )
+            if markdown2html:
+                yield "LUNASHOWHTML" + NativeUtils.Markdown2Html(respmessage)
+            else:
+                yield respmessage
+        furigana_debug(
+            "LLM_RESPONSE",
+            sentence=query_1,
+            furigana=query_2.furigana,
+            response=respmessage,
+        )
+        if not (respmessage and query_1.strip() and respmessage.strip()):
+            return
+        self.context.append({"role": "user", "content": query_1})
+        self.context_for_cache.append({"role": "user", "content": query})
+        self.context.append({"role": "assistant", "content": respmessage})
+        self.context_for_cache.append({"role": "assistant", "content": respmessage})
+
+    def __parse_qwen_mt_turbo(self, apitype: APIType, messages: list):
+        if self.config["model"].startswith("qwen-mt-") and apitype == APIType.aliyuncs:
+            if messages and messages[0]["role"] == "system":
+                messages.pop(0)
+        return messages
+
+    def __replace_history(self, which, match: re.Match):
+        n = int(match.group(1))
+        __message: "list[dict]" = []
+        self._gpt_common_parse_context(__message, self.context, n)
+        check = lambda k: (which == 2) or (k == ("user", "assistant")[which])
+        __message = [_.get("content") for _ in __message if (check(_.get("role")))]
+        return "\n".join(__message)
+
+    def __parsecontextN(self, query):
+        for k, b in (
+            (r"\{contextOriginal\[(\d+)\]\}", 0),
+            (r"\{contextTranslation\[(\d+)\]\}", 1),
+            (r"\{contextBoth\[(\d+)\]\}", 2),
+        ):
+            query = re.sub(k, functools.partial(self.__replace_history, b), query)
+        return query
+
+    def __extract_bracketed_named_terms(self, sentence: str):
+        if not sentence:
+            return []
+        patterns = (
+            r"『[^』]+』",
+            r"【[^】]+】",
+            r"〈[^〉]+〉",
+            r"《[^》]+》",
+        )
+        matches = []
+        for pattern in patterns:
+            matches.extend(re.findall(pattern, sentence))
+        seen = []
+        for term in matches:
+            if term not in seen:
+                seen.append(term)
+        return seen
+
+    def __furigana_block(self, furigana: str, sentence: str = ""):
+        if not furigana:
+            return ""
+        block = "[Furigana Thread]\n" + furigana
+        named_terms = self.__extract_bracketed_named_terms(sentence)
+        if named_terms:
+            block += (
+                "\n\n[Bracketed Named Term Hint]\n"
+                "The [Target Line] contains bracketed stylized named term(s): "
+                + " / ".join(named_terms)
+                + "\nRender those bracketed named term(s) from the furigana reading above, not from the literal kanji gloss.\n"
+                "Preserve the original Japanese brackets exactly.\n"
+                "Do not translate those bracketed named term(s) literally."
+            )
+        return block
+
+    def __inject_furigana(self, prompt: str, furigana: str, sentence: str = ""):
+        if not prompt:
+            return prompt, False
+        used = False
+        if "{furigana}" in prompt:
+            prompt = prompt.replace("{furigana}", furigana or "")
+            used = True
+        if "{furiganaBlock}" in prompt:
+            prompt = prompt.replace(
+                "{furiganaBlock}", self.__furigana_block(furigana or "", sentence)
+            )
+            used = True
+        return prompt, used
+
+    def __retry_guard_block(self, query_2: GptTextWithDict):
+        if not getattr(query_2, "retry_reason", ""):
+            return ""
+        return (
+            "[Retry Guard]\n"
+            "A previous attempt returned the line unchanged or mostly untranslated in Japanese.\n"
+            "Retry the same [Target Line] now and output a proper English translation.\n"
+            "Do NOT copy the Japanese source text unchanged.\n"
+            "Preserve Japanese quote and bracket glyphs exactly, but translate the Japanese text inside them into English.\n"
+            "Prefer natural English VN narration over clause-by-clause Japanese syntax."
+        )
+
+    def __if_has_dwp(self, dictionary: GptDict, prompt):
+        _has = re.search(r"\{DictWithPrompt(.*?)\[(.*?)\]\}", prompt)
+        if _has:
+
+            def __rep(m: re.Match):
+                tabsplit = m.groups()[0] == "TabSplit"
+                nextc = m.groups()[2]
+                if not dictionary:
+                    if nextc == "\n":
+                        return ""
+                    return nextc
+                __ = []
+                for _ in dictionary:
+                    info = ("", (" #{}", "\t{}")[tabsplit].format(_.info))[bool(_.info)]
+                    single = (
+                        "{}{}{}{}".format(
+                            ("\t", "")[tabsplit], _.src, ("->", "\t")[tabsplit], _.dst
+                        )
+                        + info
+                    )
+                    __.append(single)
+                if nextc != "\n":
+                    nextc = "\n" + nextc
+                pro: str = m.groups()[1]
+                if not pro.endswith("\n"):
+                    pro += "\n"
+                return pro + "\n".join(__) + nextc
+
+            prompt = re.sub(r"\{DictWithPrompt(.*?)\[(.*?)\]\}([\s\S]?)", __rep, prompt)
+        return prompt, bool(_has)
+
+    def __gpt_create_query_maybe_with_dict(
+        self, query_2: GptTextWithDict, _has_1, furigana_already_used=False
+    ):
+
+        furigana = query_2.furigana
+        sentence = query_2.rawtext or query_2.parsedtext or ""
+        user_prompt = self._gptlike_get_user_prompt(
+            "use_user_user_prompt", "user_user_prompt"
+        )
+        user_prompt, _has = self.__if_has_dwp(query_2.dictionary, user_prompt)
+        user_prompt, furigana_placeholder_used = self.__inject_furigana(
+            user_prompt, furigana, sentence
+        )
+        _has = _has or _has_1
+        query_1 = (query_2.parsedtext, query_2.rawtext)[_has]
+        query = user_prompt.replace("{sentence}", query_1)
+        if furigana and not (furigana_placeholder_used or furigana_already_used):
+            query += "\n\n" + self.__furigana_block(furigana, sentence)
+        retry_guard = self.__retry_guard_block(query_2)
+        if retry_guard:
+            query += "\n\n" + retry_guard
+        query = self.__parsecontextN(query)
+        return query, query_1
+
+    def commoncreatemessages(self, query_2: GptTextWithDict):
+        sentence = query_2.rawtext or query_2.parsedtext or ""
+        sysprompt = self._gptlike_createsys("使用自定义promt", "自定义promt")
+        sysprompt, _has = self.__if_has_dwp(query_2.dictionary, sysprompt)
+        sysprompt, sysprompt_uses_furigana = self.__inject_furigana(
+            sysprompt, query_2.furigana, sentence
+        )
+        query, query_1 = self.__gpt_create_query_maybe_with_dict(
+            query_2, _has, furigana_already_used=sysprompt_uses_furigana
+        )
+        sysprompt = self.__parsecontextN(sysprompt)
+        message = [{"role": "system", "content": sysprompt}]
+        checknum = self.config["附带上下文个数"]
+        __message = []
+        if self.config.get("cachecontext", False):
+            if self.context_for_cache_skipinter_shouldmove:
+                self.context_for_cache_skipinter = (
+                    len(self.context_for_cache) - (checknum // 2) * 2
+                )
+                self.context_for_cache_skipinter_shouldmove = False
+            if len(self.context_for_cache) < checknum:
+                self.context_for_cache_skipinter = 0
+            self._gpt_common_parse_context(
+                __message,
+                self.context_for_cache[self.context_for_cache_skipinter :],
+                checknum,
+            )
+        else:
+            self._gpt_common_parse_context(__message, self.context, checknum)
+        self.context_for_cache_skipinter_shouldmove = len(__message) == checknum * 2
+        message.extend(__message)
+        message.append({"role": "user", "content": query})
+        prefill = self._gptlike_create_prefill("prefill_use", "prefill")
+        if prefill:
+            message.append({"role": "assistant", "content": prefill})
+        return message, query, query_1
+
+    def request_gemini(self, apitype, messages: list, extrabody, extraheader):
+
+        sysprompt = messages[0]["content"]
+        messages.pop(0)
+        for i, item in enumerate(messages):
+            messages[i] = {
+                "role": {"assistant": "model", "user": "user"}[item["role"]],
+                "parts": [{"text": item["content"]}],
+            }
+        return common_create_gemini_request(
+            self.proxysession,
+            self.config,
+            self.multiapikeycurrent["SECRET_KEY"],
+            sysprompt,
+            messages,
+            extraheader,
+            extrabody,
+            apitype,
+        )
+
+    def req_claude(self, messages: list, extrabody, extraheader, cache_control):
+        temperature = self.config["Temperature"]
+        sysprompt = messages[0]["content"]
+        messages.pop(0)
+
+        if cache_control and isinstance(sysprompt, str):
+            sysprompt = [
+                {
+                    "type": "text",
+                    "text": sysprompt,
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                }
+            ]
+        headers = {
+            "anthropic-version": "2023-06-01",
+            "accept": "application/json",
+            "X-Api-Key": self.multiapikeycurrent["SECRET_KEY"],
+        }
+
+        usingstream = self.config["流式输出"]
+        data = dict(
+            model=self.config["model"],
+            messages=messages,
+            system=sysprompt,
+            max_tokens=self.config["max_tokens"],
+            temperature=temperature,
+            stream=usingstream,
+        )
+        headers.update(extraheader)
+        data.update(extrabody)
+        response = self.proxysession.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=data,
+            stream=usingstream,
+        )
+        return response

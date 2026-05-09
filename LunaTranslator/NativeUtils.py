@@ -1,0 +1,1328 @@
+from ctypes import (
+    c_uint,
+    c_bool,
+    POINTER,
+    c_char_p,
+    c_wchar_p,
+    pointer,
+    CDLL,
+    c_int,
+    c_void_p,
+    cast,
+    create_unicode_buffer,
+    create_string_buffer,
+    c_size_t,
+    c_float,
+    c_double,
+    c_char,
+    c_uint64,
+    c_int32,
+    CFUNCTYPE,
+)
+import winreg
+from ctypes.wintypes import (
+    WORD,
+    HWND,
+    DWORD,
+    WPARAM,
+    LPARAM,
+    HANDLE,
+    UINT,
+    BOOL,
+    LONG,
+    LPCWSTR,
+    MAX_PATH,
+)
+from windows import AutoHandle
+from xml.sax.saxutils import escape
+import gobject, os, json
+import windows, functools, re, csv
+from traceback import print_exc
+
+HRESULT = LONG
+
+utilsdll = CDLL(gobject.GetDllpath("NativeUtils.dll"))
+
+OpenFileEx = utilsdll.OpenFileEx
+OpenFileEx.argtypes = (LPCWSTR,)
+SetCurrProcessMute = utilsdll.SetCurrProcessMute
+SetCurrProcessMute.argtypes = (c_bool,)
+MonitorPidVolume = utilsdll.MonitorPidVolume
+MonitorPidVolume.argtypes = (DWORD,)
+MonitorPidVolume_callback_t = CFUNCTYPE(None, BOOL)
+StartMonitorVolume = utilsdll.StartMonitorVolume
+StartMonitorVolume.argtypes = (MonitorPidVolume_callback_t,)
+
+SuspendResumeProcess = utilsdll.SuspendResumeProcess
+SuspendResumeProcess.argtypes = (DWORD,)
+
+_SAPI_List = utilsdll.SAPI_List
+_SAPI_List.argtypes = (c_uint, c_void_p)
+
+_SAPI_Speak = utilsdll.SAPI_Speak
+_SAPI_Speak.argtypes = (c_wchar_p, c_wchar_p, c_int, c_int, c_int, c_void_p)
+_SAPI_Speak.restype = c_bool
+
+
+class SAPI:
+    @staticmethod
+    def List(v):
+        ret = []
+
+        def __(ret: list, _id, name):
+            ret.append((_id, name))
+
+        _SAPI_List(v, CFUNCTYPE(None, c_wchar_p, c_wchar_p)(functools.partial(__, ret)))
+        return ret
+
+    @staticmethod
+    def Speak(content, voiceid, rate, pitch, volume=100):
+        ret = []
+
+        def _cb(ptr, size):
+            ret.append(ptr[:size])
+
+        fp = CFUNCTYPE(None, POINTER(c_char), c_size_t)(_cb)
+        succ = _SAPI_Speak(
+            escape(content), voiceid, int(rate), int(volume), int(pitch), fp
+        )
+        if not succ:
+            return None
+        return ret[0]
+
+
+levenshtein_distance = utilsdll.levenshtein_distance
+levenshtein_distance.argtypes = c_size_t, c_wchar_p, c_size_t, c_wchar_p
+levenshtein_distance.restype = c_size_t
+levenshtein_normalized_similarity = utilsdll.levenshtein_normalized_similarity
+levenshtein_normalized_similarity.argtypes = c_size_t, c_wchar_p, c_size_t, c_wchar_p
+levenshtein_normalized_similarity.restype = c_double
+
+
+def distance(s1, s2):
+    # 词典更适合用编辑距离，因为就一两个字符，相似度会很小，预翻译适合用相似度
+    if not s1:
+        s1 = ""
+    if not s2:
+        s2 = ""
+    return levenshtein_distance(len(s1), s1, len(s2), s2)
+
+
+def similarity(s1, s2):
+    if not s1:
+        s1 = ""
+    if not s2:
+        s2 = ""
+    return levenshtein_normalized_similarity(len(s1), s1, len(s2), s2)
+
+
+class mecab(c_void_p):
+    @staticmethod
+    def create(path: str) -> "mecab":
+        return mecab_init(path.encode("utf8"))
+
+    def __del__(self):
+        mecab_end(self)
+
+    @property
+    def dictionary_codec(self):
+        codec: bytes = mecab_dictionary_codec(self)
+        return codec.decode("utf8")
+
+    def __cba(self, res: list, codec: str, surface: bytes, feature: bytes):
+        surface = surface.decode(codec)
+        feature = feature.decode(codec)
+        self.__cbw(res, surface, feature)
+
+    def __cbw(self, res: list, surface: str, feature: str):
+        res.append([surface, list(csv.reader([feature]))[0]])
+
+    def parse(self, text: str):
+        res = []
+        cl = self.dictionary_codec.lower()
+        isutf16 = (cl.startswith("utf-16")) or (cl.startswith("utf16"))
+        fp = (
+            mecab_parse_cb_w(functools.partial(self.__cbw, res))
+            if isutf16
+            else mecab_parse_cb_a(functools.partial(self.__cba, res, cl))
+        )
+        succ = mecab_parse(self, text.encode(cl), cast(fp, c_void_p))
+        if not succ:
+            raise Exception()
+        return res
+
+
+mecab_init = utilsdll.mecab_init
+mecab_init.argtypes = (c_char_p,)
+mecab_init.restype = mecab
+mecab_parse_cb_a = CFUNCTYPE(None, c_char_p, c_char_p)
+mecab_parse_cb_w = CFUNCTYPE(None, c_wchar_p, c_wchar_p)
+mecab_parse = utilsdll.mecab_parse
+mecab_parse.argtypes = (c_void_p, c_char_p, c_void_p)
+mecab_parse.restype = c_bool
+mecab_dictionary_codec = utilsdll.mecab_dictionary_codec
+mecab_dictionary_codec.argtypes = (mecab,)
+mecab_dictionary_codec.restype = c_char_p
+mecab_end = utilsdll.mecab_end
+mecab_end.argtypes = (mecab,)
+
+_ClipBoardGetText = utilsdll.ClipBoardGetText
+_ClipBoardGetText.argtypes = (c_void_p,)
+_ClipBoardGetText.restype = c_bool
+_ClipBoardGetFileNames = utilsdll.ClipBoardGetFileNames
+_ClipBoardGetFileNames.argtypes = (c_void_p,)
+_ClipBoardGetFileNames.restype = c_bool
+_ClipBoardSetText = utilsdll.ClipBoardSetText
+_ClipBoardSetText.argtypes = (c_wchar_p,)
+_ClipBoardSetImage = utilsdll.ClipBoardSetImage
+_ClipBoardSetImage.argtypes = (c_void_p, c_size_t)
+_ClipBoardSetImage.restype = c_bool
+_ClipBoardGetImage = utilsdll.ClipBoardGetImage
+_ClipBoardGetImage_CB = CFUNCTYPE(None, POINTER(c_char), c_size_t)
+_ClipBoardGetImage.argtypes = (_ClipBoardGetImage_CB,)
+_ClipBoardGetImage.restype = c_bool
+
+
+class _ClipBoard:
+    @property
+    def files(self):
+        ret: "list[str]" = []
+        if not _ClipBoardGetFileNames(CFUNCTYPE(None, c_wchar_p)(ret.append)):
+            return []
+        return ret
+
+    @property
+    def text(self):
+        ret = []
+        if not _ClipBoardGetText(CFUNCTYPE(None, c_wchar_p)(ret.append)):
+            return ""
+        return ret[0]
+
+    @text.setter
+    def text(self, t: str):
+        _ClipBoardSetText(t)
+
+    @property
+    def image(self):
+        ret: "list[bytes]" = []
+
+        def _cb(ptr, size):
+            ret.append(ptr[:size])
+
+        if not _ClipBoardGetImage(_ClipBoardGetImage_CB(_cb)):
+            return None
+        if ret:
+            return ret[0]
+        return None
+
+    @image.setter
+    def image(self, bytes_: bytes):
+        _ClipBoardSetImage(bytes_, len(bytes_))
+
+    def setText(self, t: str):
+        self.text = t
+
+
+ClipBoard = _ClipBoard()
+
+_GetLnkTargetPath = utilsdll.GetLnkTargetPath
+_GetLnkTargetPath.argtypes = c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p
+
+
+def GetLnkTargetPath(lnk):
+    exe = create_unicode_buffer(MAX_PATH + 1)
+    arg = create_unicode_buffer(MAX_PATH + 1)
+    icon = create_unicode_buffer(MAX_PATH + 1)
+    dirp = create_unicode_buffer(MAX_PATH + 1)
+    _GetLnkTargetPath(lnk, exe, arg, icon, dirp)
+    return exe.value, arg.value, icon.value, dirp.value
+
+
+_ExtractExeIconData = utilsdll.ExtractExeIconData
+_ExtractExeIconDataCB = CFUNCTYPE(None, POINTER(c_char), c_size_t)
+_ExtractExeIconData.argtypes = c_bool, c_wchar_p, _ExtractExeIconDataCB
+_ExtractExeIconData.restype = c_bool
+
+
+def ExtractExeIconData(file, large=False):
+
+    file = windows.check_maybe_unc_file(file)
+    if not file:
+        return False
+    ret = []
+
+    def cb(ptr, size):
+        ret.append(ptr[:size])
+
+    cb = _ExtractExeIconDataCB(cb)
+    succ = _ExtractExeIconData(large, file, cb)
+    if not succ:
+        return None
+    return ret[0]
+
+
+_queryversion = utilsdll.QueryVersion
+_queryversion.restype = c_bool
+_queryversion.argtypes = (
+    c_wchar_p,
+    POINTER(WORD),
+    POINTER(WORD),
+    POINTER(WORD),
+    POINTER(WORD),
+)
+
+
+def QueryVersion(exe):
+    _1 = WORD()
+    _2 = WORD()
+    _3 = WORD()
+    _4 = WORD()
+    succ = _queryversion(exe, pointer(_1), pointer(_2), pointer(_3), pointer(_4))
+    if succ:
+        return _1.value, _2.value, _3.value, _4.value
+    return None
+
+
+ClipBoardListenerStart = utilsdll.ClipBoardListenerStart
+ClipBoardListenerStop = utilsdll.ClipBoardListenerStop
+WindowMessageCallback_t = CFUNCTYPE(None, UINT, WPARAM, LPARAM)
+WinEventHookCALLBACK_t = CFUNCTYPE(None, DWORD, HWND, LONG)
+globalmessagelistener = utilsdll.globalmessagelistener
+globalmessagelistener.argtypes = (
+    WinEventHookCALLBACK_t,
+    WindowMessageCallback_t,
+)
+dispatchcloseevent = utilsdll.dispatchcloseevent
+
+SetWindowExtendFrame = utilsdll.SetWindowExtendFrame
+SetWindowExtendFrame.argtypes = (HWND,)
+
+SetTheme = utilsdll.SetTheme
+SetTheme.argtypes = HWND, c_bool, c_int
+SetCornerNotRound = utilsdll.SetCornerNotRound
+SetCornerNotRound.argtypes = HWND, c_bool, c_bool
+
+_ListProcesses = utilsdll.ListProcesses
+_ListProcesses.argtypes = (c_void_p,)
+
+
+def ListProcesses():
+    ret: "list[tuple[int, str]]" = []
+    _ListProcesses(
+        CFUNCTYPE(None, DWORD, c_wchar_p)(lambda pid, exe: ret.append((pid, exe)))
+    )
+    return ret
+
+
+SetWindowInTaskbar = utilsdll.SetWindowInTaskbar
+SetWindowInTaskbar.argtypes = HWND, c_bool, c_bool
+
+
+IsProcessRunning = utilsdll.IsProcessRunning
+IsProcessRunning.argtypes = (DWORD,)
+IsProcessRunning.restype = c_bool
+
+
+def collect_running_pids(pids):
+    _ = []
+    for __ in pids:
+        if not IsProcessRunning(__):
+            continue
+        _.append(__)
+    return _
+
+
+GetProcessFirstWindow = utilsdll.GetProcessFirstWindow
+GetProcessFirstWindow.argtypes = (DWORD,)
+GetProcessFirstWindow.restype = HWND
+
+Is64bit = utilsdll.Is64bit
+Is64bit.argtypes = (DWORD,)
+Is64bit.restype = c_bool
+
+IsDark = utilsdll.IsDark
+IsDark.restype = c_bool
+
+
+_GdiGrabWindow = utilsdll.GdiGrabWindow
+_GdiGrabWindow.argtypes = HWND, c_void_p
+
+_GdiCropImage = utilsdll.GdiCropImage
+_GdiCropImage.argtypes = HWND, c_int, c_int, c_int, c_int, c_void_p
+_GdiCropImage.restype = c_bool
+
+
+def GdiGrabWindow(hwnd):
+    if windows.GetClassName(hwnd) == "UnityWndClass":
+        return None
+    ret = []
+
+    def cb(ptr, size):
+        ret.append(ptr[:size])
+
+    _GdiGrabWindow(hwnd, CFUNCTYPE(None, POINTER(c_char), c_size_t)(cb))
+    if not ret:
+        return None
+    return ret[0]
+
+
+def GdiCropImage(x1, y1, x2, y2, hwnd=None):
+    ret: "list[bytes]" = []
+
+    def cb(ptr, size):
+        ret.append(ptr[:size])
+
+    if windows.GetClassName(hwnd) == "UnityWndClass":
+        hwnd = None
+    succ: bool = _GdiCropImage(
+        hwnd, x1, y1, x2, y2, CFUNCTYPE(None, POINTER(c_char), c_size_t)(cb)
+    )
+    if not ret:
+        return False, None
+    return succ, ret[0]
+
+
+setAeroEffect = utilsdll.setAeroEffect
+setAeroEffect.argtypes = (HWND, c_bool)
+setAcrylicEffect = utilsdll.setAcrylicEffect
+setAcrylicEffect.argtypes = (HWND, c_bool, DWORD)
+clearEffect = utilsdll.clearEffect
+clearEffect.argtypes = (HWND,)
+
+
+# Abastract Webview
+
+AbstractWebViewPTR = c_void_p
+webview_destroy = utilsdll.webview_destroy
+webview_destroy.argtypes = (AbstractWebViewPTR,)
+webview_resize = utilsdll.webview_resize
+webview_resize.argtypes = AbstractWebViewPTR, c_int, c_int
+webview_add_menu = utilsdll.webview_add_menu
+webview_add_menu_noselect_CALLBACK = CFUNCTYPE(None)
+webview_add_menu_CALLBACK = CFUNCTYPE(None, c_wchar_p)
+webview_add_menu_noselect_getchecked = CFUNCTYPE(c_bool)
+webview_add_menu_noselect_getuse = CFUNCTYPE(c_bool)
+webview_contextmenu_gettext = CFUNCTYPE(c_wchar_p)
+webview_add_menu.argtypes = (
+    AbstractWebViewPTR,
+    c_int,
+    c_void_p,
+    c_void_p,
+    c_void_p,
+    c_void_p,
+    c_bool,
+)
+webview_evaljs = utilsdll.webview_evaljs
+webview_evaljs.argtypes = AbstractWebViewPTR, c_wchar_p, c_void_p
+webview_evaljs_CALLBACK = CFUNCTYPE(None, c_wchar_p)
+
+webview_bind = utilsdll.webview_bind
+webview_bind.argtypes = AbstractWebViewPTR, c_wchar_p, c_void_p
+webview_navigate = utilsdll.webview_navigate
+webview_navigate.argtypes = AbstractWebViewPTR, c_wchar_p
+webview_sethtml = utilsdll.webview_sethtml
+webview_sethtml.argtypes = AbstractWebViewPTR, c_wchar_p
+webview_put_PreferredColorScheme = utilsdll.webview_put_PreferredColorScheme
+webview_put_PreferredColorScheme.argtypes = AbstractWebViewPTR, c_int
+webview_put_ZoomFactor = utilsdll.webview_put_ZoomFactor
+webview_put_ZoomFactor.argtypes = AbstractWebViewPTR, c_double
+webview_get_ZoomFactor = utilsdll.webview_get_ZoomFactor
+webview_get_ZoomFactor.argtypes = (AbstractWebViewPTR,)
+webview_get_ZoomFactor.restype = c_double
+
+
+def wrapgetlabel(getlabel):
+    if not getlabel:
+        return
+
+    def __(f):
+        _ = f()
+        return str_alloc(_)
+
+    return functools.partial(__, getlabel)
+
+
+class AbstractWebView:
+
+    def bind(self, fname: str, fp):
+        raise Exception()
+
+    def __del__(self):
+        self.destroy()
+
+    def destroy(self):
+        _ = self.ptr
+        self.ptr = None
+        webview_destroy(_)
+
+    def __init__(self):
+        self.html_limit = 2 * 1024 * 1024
+        self.callbacks = []
+        self.ptr = AbstractWebViewPTR()
+
+    def eval(self, js: str, callback=None):
+        cb = webview_evaljs_CALLBACK(callback) if callback else None
+        webview_evaljs(self.ptr, js, cb)
+
+    def _bind(self, fname: str, fp=None):
+        self.callbacks.append(fp)
+        webview_bind(self.ptr, fname, fp)
+
+    def put_PreferredColorScheme(self, darklight: int):
+        webview_put_PreferredColorScheme(self.ptr, darklight)
+
+    def get_zoom(self) -> float:
+        return webview_get_ZoomFactor(self.ptr)
+
+    def set_zoom(self, zoom: float):
+        webview_put_ZoomFactor(self.ptr, zoom)
+
+    def navigate(self, url: str):
+        webview_navigate(self.ptr, url)
+
+    def resize(self, w: int, h: int):
+        if not self.ptr:
+            return
+        webview_resize(self.ptr, int(w), int(h))
+
+    def setHtml(self, html: str):
+        webview_sethtml(self.ptr, html)
+
+    def _add_menu(
+        self,
+        select,
+        index=0,
+        getlabel=None,
+        callback=None,
+        getchecked=None,
+        getuse=None,
+    ):
+        __ = callback
+        self.callbacks.append(__)
+        __1 = webview_add_menu_noselect_getchecked(getchecked) if getchecked else None
+        self.callbacks.append(__1)
+        __2 = webview_add_menu_noselect_getuse(getuse) if getuse else None
+        self.callbacks.append(__2)
+        getlabel = wrapgetlabel(getlabel)
+        __3 = webview_contextmenu_gettext(getlabel) if getlabel else None
+        self.callbacks.append(__3)
+        webview_add_menu(self.ptr, index, __3, __, __1, __2, select)
+        return index + 1
+
+
+# Abastract Webview end
+
+# WebView2
+webview2_create = utilsdll.webview2_create
+webview2_create.argtypes = (
+    POINTER(AbstractWebViewPTR),
+    HWND,
+    c_bool,
+    c_bool,
+)
+webview2_create.restype = HRESULT
+webview2_set_callbacks = utilsdll.webview2_set_callbacks
+webview2_zoomchange_callback_t = CFUNCTYPE(None, c_double)
+webview2_navigating_callback_t = CFUNCTYPE(None, c_wchar_p, c_bool)
+webview2_webmessage_callback_t = CFUNCTYPE(None, c_wchar_p)
+webview2_FilesDropped_callback_t = CFUNCTYPE(None, c_wchar_p)
+webview2_titlechange_callback_t = CFUNCTYPE(None, c_wchar_p)
+webview2_IconChanged_callback_t = CFUNCTYPE(None, POINTER(c_char), c_size_t)
+webview2_set_callbacks.argtypes = (
+    AbstractWebViewPTR,
+    webview2_zoomchange_callback_t,
+    webview2_navigating_callback_t,
+    webview2_webmessage_callback_t,
+    webview2_FilesDropped_callback_t,
+    webview2_titlechange_callback_t,
+    webview2_IconChanged_callback_t,
+)
+_webview2_detect_version = utilsdll.webview2_detect_version
+_webview2_detect_version.argtypes = c_wchar_p, c_void_p
+
+webview2_ext_add = utilsdll.webview2_ext_add
+webview2_ext_add.argtypes = (c_wchar_p,)
+webview2_ext_add.restype = HRESULT
+webview2_list_ext_CALLBACK_T = CFUNCTYPE(None, c_wchar_p, c_wchar_p, BOOL)
+webview2_ext_list = utilsdll.webview2_ext_list
+webview2_ext_list.argtypes = (webview2_list_ext_CALLBACK_T,)
+webview2_ext_list.restype = HRESULT
+webview2_ext_enable = utilsdll.webview2_ext_enable
+webview2_ext_enable.argtypes = (c_wchar_p, BOOL)
+webview2_ext_enable.restype = HRESULT
+webview2_ext_rm = utilsdll.webview2_ext_rm
+webview2_ext_rm.argtypes = (c_wchar_p,)
+webview2_ext_rm.restype = HRESULT
+webview2_get_userdir = utilsdll.webview2_get_userdir
+webview2_get_userdir_callback = CFUNCTYPE(None, c_wchar_p)
+webview2_get_userdir.argtypes = (webview2_get_userdir_callback,)
+
+
+class WebView2(AbstractWebView):
+
+    @staticmethod
+    def DetectVersion(directory=None):
+
+        def safe_int(s):
+            match = re.search(r"\d+", s)
+            if match:
+                return int(match.group())
+            else:
+                return 0
+
+        _ = []
+        _f = CFUNCTYPE(c_void_p, c_wchar_p)(_.append)
+        _webview2_detect_version(directory, _f)
+        if _:
+            # X.X.X.X beta
+            return tuple(safe_int(_) for _ in _[0].split("."))
+
+    @staticmethod
+    def FindFixedRuntime():
+        hasset = os.environ.get("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER")
+        if hasset:
+            # 已设置的环境变量会影响检测。直接返回就行了
+            return hasset
+        maxversion = (0, 0, 0, 0)
+        maxvf = None
+
+        for f in os.listdir("."):
+            f = os.path.abspath(f)
+            version = WebView2.DetectVersion(f)
+            # 这个API似乎可以检测runtime是否是有效的，比自己查询版本更好
+            if not version:
+                continue
+            if (version[0] > 109) and gobject.sys_le_win81:
+                continue
+            if version > maxversion:
+                maxversion = version
+                maxvf = f
+                print(maxversion, f)
+        return maxvf
+
+    def __init__(self, parent: HWND = None, transp=False, loadext=False, darklight=0):
+        super().__init__()
+        self.html_limit = 1572834
+        self.binds = {}
+        FixedRuntime = self.FindFixedRuntime()
+        if FixedRuntime:
+            os.environ["WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"] = FixedRuntime
+            # 在共享路径上无法运行
+            os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--no-sandbox"
+        _ = windows.CO_INIT()
+        windows.CHECK_FAILURE(
+            webview2_create(windows.pointer(self.ptr), parent, transp, loadext)
+        )
+        self.put_PreferredColorScheme(darklight)
+
+    def bind(self, fname, func):
+        self.binds[fname] = func
+        self._bind(fname)
+
+    def __webmessage_callback_f(self, js: str):
+        # 其实不应该在这里处理回调，否则例如如果在这里用getHTML，会卡死。
+        # 应该用PostMessageW(m_message_window, WM_APP, 0, (LPARAM) func)传出去再处理才对。
+        # 但是暂时没问题，就先这样吧。
+        try:
+            js: dict = json.loads(js)
+            method = js.get("method")
+            args = js.get("args")
+            self.binds[method](*args)
+        except:
+            print_exc()
+
+    def set_callbacks(
+        self,
+        zoomchange_callback,
+        navigating_callback,
+        FilesDropped_callback,
+        titlechange_callback,
+        IconChanged_callback,
+    ):
+        callbacks = []
+        callbacks.append(webview2_zoomchange_callback_t(zoomchange_callback))
+        callbacks.append(webview2_navigating_callback_t(navigating_callback))
+        callbacks.append(webview2_webmessage_callback_t(self.__webmessage_callback_f))
+        callbacks.append(webview2_FilesDropped_callback_t(FilesDropped_callback))
+        callbacks.append(webview2_titlechange_callback_t(titlechange_callback))
+        callbacks.append(webview2_IconChanged_callback_t(IconChanged_callback))
+        self.callbacks.extend(callbacks)
+        webview2_set_callbacks(self.ptr, *callbacks)
+
+    class Extensions:
+
+        @staticmethod
+        def List():
+            collect = []
+
+            def __(_, _1, _2):
+                collect.append((_, _1, _2))
+
+            _ = webview2_list_ext_CALLBACK_T(__)
+            windows.CHECK_FAILURE(webview2_ext_list(_))
+            return collect
+
+        @staticmethod
+        def Enable(_id, enable):
+            windows.CHECK_FAILURE(webview2_ext_enable(_id, enable))
+
+        @staticmethod
+        def Remove(_id):
+            windows.CHECK_FAILURE(webview2_ext_rm(_id))
+
+        @staticmethod
+        def Add(path):
+            windows.CHECK_FAILURE(webview2_ext_add(path))
+
+        @staticmethod
+        def Manifest_Info(extid: str):
+
+            def __ExtensionDir(extid: str):
+
+                def __getuserdir():
+                    _ = []
+                    __ = webview2_get_userdir_callback(_.append)
+                    webview2_get_userdir(__)
+                    if _:
+                        return _[0]
+
+                path = __getuserdir()
+                if not path:
+                    return
+                path = os.path.join(path, "EBWebView/Default/Secure Preferences")
+                try:
+                    with open(path, "r", encoding="utf8") as ff:
+                        js = json.load(ff)
+                    path = js["extensions"]["settings"][extid]["path"]
+                    return path
+                except:
+                    pass
+
+            path = __ExtensionDir(extid)
+            if not path:
+                return
+            path1 = os.path.join(path, "manifest.json")
+            try:
+                with open(path1, "r", encoding="utf8") as ff:
+                    manifest = json.load(ff)
+                data = {}
+                data["path"] = path
+                try:
+                    icons = manifest["icons"]
+                    icon = icons[str(max((int(_) for _ in icons)))]
+                    data["icon"] = os.path.join(path, icon)
+                except:
+                    pass
+                try:
+                    path = manifest["options_ui"]["page"]
+                    url = "chrome-extension://{}/{}".format(extid, path)
+                    data["url"] = url
+                except:
+                    pass
+                return data
+            except:
+                return
+
+
+# WebView2
+# EdgeHtml
+
+edgehtml_new = utilsdll.edgehtml_new
+edgehtml_new.argtypes = (POINTER(AbstractWebViewPTR), HWND, c_bool)
+edgehtml_new.restype = HRESULT
+edgehtml_set_notify_callback = utilsdll.edgehtml_set_notify_callback
+web_notify_callback_t = CFUNCTYPE(None, LPCWSTR)
+edgehtml_set_notify_callback.argtypes = AbstractWebViewPTR, web_notify_callback_t
+
+
+class EdgeHtml(AbstractWebView):
+
+    def bind(self, fname, func):
+        self.binds[fname] = func
+        self._bind(fname)
+
+    def __init__(self, parent: HWND = None, transp=False):
+        super().__init__()
+        self.binds = {}
+        self.html_limit = 1572834
+        _ = windows.CO_INIT()
+        windows.CHECK_FAILURE(edgehtml_new(windows.pointer(self.ptr), parent, transp))
+        self._keepref = web_notify_callback_t(self.__web_notify_callback)
+        edgehtml_set_notify_callback(self.ptr, self._keepref)
+
+    def __web_notify_callback(self, js):
+        try:
+            js: dict = json.loads(js)
+            method = js.get("method")
+            args = js.get("args")
+            self.binds[method](*args)
+        except:
+            print_exc()
+
+
+# EdgeHtml
+# MSHTML
+AbstractWebViewPTR
+html_version = utilsdll.html_version
+html_version.restype = DWORD
+html_new = utilsdll.html_new
+html_new.argtypes = (HWND, POINTER(AbstractWebViewPTR))
+html_get_current_url = utilsdll.html_get_current_url
+html_get_current_url.argtypes = (AbstractWebViewPTR, c_void_p)
+html_get_select_text = utilsdll.html_get_select_text
+html_get_select_text_cb = CFUNCTYPE(None, c_wchar_p)
+html_get_select_text.argtypes = (AbstractWebViewPTR, c_void_p)
+html_get_html = utilsdll.html_get_html
+html_get_html.argtypes = (AbstractWebViewPTR, c_void_p, c_wchar_p)
+html_bind_function_FT = CFUNCTYPE(None, POINTER(c_wchar_p), c_int)
+html_check_ctrlc = utilsdll.html_check_ctrlc
+html_check_ctrlc.argtypes = (AbstractWebViewPTR,)
+html_check_ctrlc.restype = c_bool
+
+
+class MSHTML(AbstractWebView):
+    @property
+    def ptr(self) -> AbstractWebViewPTR:
+        return self.browser
+
+    @ptr.setter
+    def ptr(self, _):
+        self.browser = _
+
+    def __bindhelper(self, func, ppwc, argc):
+        argv = []
+        for i in range(argc):
+            argv.append(ppwc[argc - 1 - i])
+        func(*argv)
+
+    def bind(self, fname, func):
+        __f = html_bind_function_FT(functools.partial(self.__bindhelper, func))
+        self._bind(fname, __f)
+
+    def __init__(self, parent: HWND = None):
+        super().__init__()
+        self.html_limit = 1
+        self.browser = AbstractWebViewPTR()
+        html_new(int(parent), pointer(self.browser))
+        iswine = self.__checkisusingwine()
+        if iswine or (html_version() < 10001):  # ie10之前，sethtml会乱码
+            self.html_limit = 0
+
+    def __checkisusingwine(self) -> bool:
+        iswine = True
+        try:
+            winreg.OpenKeyEx(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Wine",
+                0,
+                winreg.KEY_QUERY_VALUE,
+            )
+        except FileNotFoundError:
+            iswine = False
+        return iswine
+
+    def get_current_url(self) -> str:
+        _ = []
+        cb = html_get_select_text_cb(_.append)
+        html_get_current_url(self.browser, cb)
+        return _[0] if _ else ""
+
+    def is_ctrl_c_callback(self, callback):
+        if html_check_ctrlc(self.browser):
+            cb = html_get_select_text_cb(callback)
+            html_get_select_text(self.browser, cb)
+
+
+# MSHTML
+
+# LoopBack
+StartCaptureAsync_cb = CFUNCTYPE(None, POINTER(c_char), c_size_t)
+StartCaptureAsync = utilsdll.StartCaptureAsync
+StartCaptureAsync.argtypes = (POINTER(c_void_p),)
+StartCaptureAsync.restype = HRESULT
+StopCapture = utilsdll.StopCapture
+StopCapture.argtypes = (c_void_p, StartCaptureAsync_cb)
+
+
+class loopbackrecorder:
+    def __datacollect(self, ptr, size):
+        self.data = ptr[:size]
+
+    def stop(self):
+        __ = StartCaptureAsync_cb(self.__datacollect)
+        StopCapture(self.ptr, __)
+        self.ptr = None
+
+    def __del__(self):
+        self.stop()
+
+    def __init__(self) -> None:
+        self.data = None
+        self.ptr = c_void_p()
+        windows.CHECK_FAILURE(StartCaptureAsync(pointer(self.ptr)))
+
+
+# LoopBack
+
+IsWindowViewable = utilsdll.IsWindowViewable
+IsWindowViewable.argtypes = (HWND,)
+IsWindowViewable.restype = c_bool
+_GetSelectedText = utilsdll.GetSelectedText
+_GetSelectedText.argtypes = (c_void_p,)
+_GetSelectedText.restype = c_bool
+
+
+def GetSelectedText():
+    ret = []
+    support = _GetSelectedText(CFUNCTYPE(None, c_wchar_p)(ret.append))
+    if not support:
+        return None
+    if len(ret):
+        return ret[0]
+    return ""
+
+
+GetSecurityAttributes = utilsdll.GetSecurityAttributes
+GetSecurityAttributes.restype = c_void_p
+
+
+def SimpleCreateEvent(name):
+    return windows.CreateEventW(GetSecurityAttributes(), False, False, name)
+
+
+def SimpleCreateMutex(name):
+    return windows.CreateMutexW(GetSecurityAttributes(), False, name)
+
+
+CreateProcessWithJob = utilsdll.CreateProcessWithJob
+CreateProcessWithJob.argtypes = c_wchar_p, c_wchar_p, POINTER(DWORD), c_bool, c_bool
+CreateProcessWithJob.restype = AutoHandle
+SetJobAutoKill = utilsdll.SetJobAutoKill
+SetJobAutoKill.argtypes = HANDLE, c_bool
+CreateJobForProcess = utilsdll.CreateJobForProcess
+CreateJobForProcess.argtypes = DWORD, c_bool
+CreateJobForProcess.restype = AutoHandle
+
+
+class AutoKillProcess:
+    def setkill(self, kill):
+        SetJobAutoKill(self._refkep, kill)
+
+    def __init__(self, commandorpid: "str|int", path=None, hide=True, kill=True):
+        if isinstance(commandorpid, int):
+            self.pid = commandorpid
+            self._refkep = CreateJobForProcess(commandorpid, kill)
+        else:
+            pid = DWORD()
+            self._refkep = CreateProcessWithJob(
+                commandorpid, path, pointer(pid), hide, kill
+            )
+            self.pid = pid.value
+
+
+_SysRegisterHotKey = utilsdll.SysRegisterHotKey
+hotkeycallback_t = CFUNCTYPE(None)
+_SysRegisterHotKey.argtypes = UINT, UINT, hotkeycallback_t
+_SysRegisterHotKey.restype = c_int
+_SysUnRegisterHotKey = utilsdll.SysUnRegisterHotKey
+_SysUnRegisterHotKey.argtypes = (c_int,)
+__hotkeycallback_s = {}
+
+
+def RegisterHotKey(_, cb):
+    mod, vk = _
+    cb = hotkeycallback_t(cb)
+    uid = _SysRegisterHotKey(mod, vk, cb)
+    if uid:
+        __hotkeycallback_s[uid] = cb
+    return uid
+
+
+def UnRegisterHotKey(uid):
+    _SysUnRegisterHotKey(uid)
+    try:
+        __hotkeycallback_s.pop(uid)
+    except:
+        pass
+
+
+# winrt
+winrt_OCR = utilsdll.winrt_OCR
+winrt_OCR.argtypes = c_void_p, c_size_t, c_wchar_p, c_void_p
+
+winrt_OCR_check_language_valid = utilsdll.winrt_OCR_check_language_valid
+winrt_OCR_check_language_valid.argtypes = (c_wchar_p,)
+winrt_OCR_check_language_valid.restype = c_bool
+
+winrt_OCR_get_AvailableRecognizerLanguages = (
+    utilsdll.winrt_OCR_get_AvailableRecognizerLanguages
+)
+winrt_OCR_get_AvailableRecognizerLanguages.argtypes = (c_void_p,)
+
+winrt_capture_window = utilsdll.winrt_capture_window
+winrt_capture_window.argtypes = c_void_p, c_void_p, c_bool
+
+
+class WinRT:
+    @staticmethod
+    def OCR_check_language_valid(lang: str) -> bool:
+        return winrt_OCR_check_language_valid(lang)
+
+    @staticmethod
+    def OCR(data: bytes, lang: str):
+        ret = []
+
+        def cb(x1, y1, x2, y2, text):
+            ret.append((text, x1, y1, x2, y2))
+
+        winrt_OCR(
+            data,
+            len(data),
+            lang,
+            CFUNCTYPE(None, c_float, c_float, c_float, c_float, c_wchar_p)(cb),
+        )
+        return ret
+
+    @staticmethod
+    def OCR_get_AvailableRecognizerLanguages():
+        ret = []
+        winrt_OCR_get_AvailableRecognizerLanguages(
+            CFUNCTYPE(None, c_wchar_p, c_wchar_p)(lambda t, d: ret.append((t, d)))
+        )
+        return ret
+
+    @staticmethod
+    def capture_window(hwnd, blackborderremove=False):
+        ret = []
+
+        def cb(ptr, size):
+            ret.append(ptr[:size])
+
+        winrt_capture_window(hwnd, CFUNCTYPE(None, POINTER(c_char), c_size_t)(cb), blackborderremove)
+        if len(ret):
+            return ret[0]
+        return None
+
+
+# winrt
+_AES_decrypt = utilsdll.AES_decrypt
+_AES_decrypt.argtypes = c_void_p, c_void_p, c_void_p, c_size_t
+
+
+def AES_decrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
+    buff = create_string_buffer(data)
+    _AES_decrypt(key, iv, buff, len(data))
+    return bytes(buff)[:-1]
+
+
+IsDLLBit64 = utilsdll.IsDLLBit64
+IsDLLBit64.argtypes = (c_wchar_p,)
+IsDLLBit64.restype = c_bool
+
+CreateShortcut = utilsdll.CreateShortcut
+CreateShortcut.argtypes = LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR
+
+str_alloc = utilsdll.str_alloc
+str_alloc.argtypes = (c_wchar_p,)
+str_alloc.restype = c_void_p
+GetParentProcessID = utilsdll.GetParentProcessID
+GetParentProcessID.argtypes = (DWORD,)
+GetParentProcessID.restype = DWORD
+MouseMoveWindow = utilsdll.MouseMoveWindow
+MouseMoveWindow.argtypes = (HWND,)
+IsMultiDifferentDPI = utilsdll.IsMultiDifferentDPI
+IsMultiDifferentDPI.restype = c_bool
+
+AdaptersServiceUninitialize = utilsdll.AdaptersServiceUninitialize
+AdaptersServiceStartMonitor_Callback = CFUNCTYPE(None)
+AdaptersServiceStartMonitor = utilsdll.AdaptersServiceStartMonitor
+AdaptersServiceStartMonitor.argtypes = (AdaptersServiceStartMonitor_Callback,)
+AdaptersServiceAdapterInfos_Callback = CFUNCTYPE(None, c_uint, c_uint, c_uint, LPCWSTR)
+AdaptersServiceAdapterInfos = utilsdll.AdaptersServiceAdapterInfos
+AdaptersServiceAdapterInfos.argtypes = (AdaptersServiceAdapterInfos_Callback,)
+
+
+_GetPackagePathByPackageFamily = utilsdll.GetPackagePathByPackageFamily
+GetPackagePathByPackageFamily_CALLBACK = CFUNCTYPE(None, LPCWSTR)
+_GetPackagePathByPackageFamily.argtypes = (
+    LPCWSTR,
+    GetPackagePathByPackageFamily_CALLBACK,
+)
+
+
+def GetPackagePathByPackageFamily(packagename: str):
+    ret: "list[str]" = []
+    cb = GetPackagePathByPackageFamily_CALLBACK(ret.append)
+    _GetPackagePathByPackageFamily(packagename, cb)
+    if ret:
+        return ret[0]
+    return None
+
+
+_FindPackages = utilsdll.FindPackages
+_FindPackages_CB = CFUNCTYPE(None, LPCWSTR, LPCWSTR)
+_FindPackages.argtypes = (_FindPackages_CB, LPCWSTR)
+
+
+def FindPackages(checkid):
+    ret: "list[tuple[str, str]]" = []
+
+    def __cb(ret: list, name, path):
+        ret.append((name, path))
+
+    _FindPackages(_FindPackages_CB(functools.partial(__cb, ret)), checkid)
+    return ret
+
+
+_Markdown2Html = utilsdll.Markdown2Html
+_Markdown2Html_cb = CFUNCTYPE(None, c_char_p)
+_Markdown2Html.argtypes = c_char_p, _Markdown2Html_cb
+
+
+def Markdown2Html(md: str):
+    ret: "list[bytes]" = []
+    _Markdown2Html(md.encode("utf8"), _Markdown2Html_cb(ret.append))
+    if ret:
+        return ret[0].decode("utf8")
+    return md
+
+
+_ListEndpoints = utilsdll.ListEndpoints
+_ListEndpoints_CB = CFUNCTYPE(None, c_wchar_p, c_wchar_p)
+_ListEndpoints.argtypes = (c_bool, _ListEndpoints_CB)
+
+
+def ListEndpoints(isinput: bool):
+    ret = []
+
+    def __(name, _id):
+        ret.append((name, _id))
+
+    _ListEndpoints(isinput, _ListEndpoints_CB(__))
+    return ret
+
+
+GetDevicePixelRatioF = utilsdll.GetDevicePixelRatioF
+GetDevicePixelRatioF.argtypes = (HWND,)
+GetDevicePixelRatioF.restype = c_float
+
+ShowLiveCaptionsWindow = utilsdll.ShowLiveCaptionsWindow
+ShowLiveCaptionsWindow.argtypes = DWORD, c_bool
+_GetLiveCaptionsText = utilsdll.GetLiveCaptionsText
+_GetLiveCaptionsText_CB = CFUNCTYPE(None, c_wchar_p)
+_GetLiveCaptionsText.argtypes = DWORD, _GetLiveCaptionsText_CB
+
+
+def GetLiveCaptionsText(pid):
+    ret: "list[str]" = []
+    cb = _GetLiveCaptionsText_CB(ret.append)
+    _GetLiveCaptionsText(pid, cb)
+    if ret:
+        return ret[0]
+    return None
+
+
+### OTHERS
+
+glens_create_request = utilsdll.glens_create_request
+glens_create_request_CB = CFUNCTYPE(None, POINTER(c_char), c_size_t)
+glens_create_request.argtypes = (
+    c_uint64,
+    c_char_p,
+    c_size_t,
+    c_char_p,
+    c_size_t,
+    c_int32,
+    c_int32,
+    glens_create_request_CB,
+)
+glens_parse_response = utilsdll.glens_parse_response
+glens_parse_response_CB = CFUNCTYPE(None, c_char_p, c_float, c_float, c_float, c_float)
+glens_parse_response.argtypes = c_char_p, c_size_t, glens_parse_response_CB
+
+
+wcocr_init = utilsdll.wcocr_init
+wcocr_init.argtypes = (
+    c_wchar_p,
+    c_wchar_p,
+)
+wcocr_init.restype = c_void_p
+
+wcocr_destroy = utilsdll.wcocr_destroy
+wcocr_destroy.argtypes = (c_void_p,)
+
+wcocr_ocr = utilsdll.wcocr_ocr
+wcocr_ocr.argtypes = c_void_p, c_char_p, c_void_p
+wcocr_ocr.restype = c_bool
+wcocr_ocr_CB = CFUNCTYPE(None, c_float, c_float, c_float, c_float, c_char_p)
+
+
+RunMessageLoop = utilsdll.RunMessageLoop
+CreateMessageWindow = utilsdll.CreateMessageWindow
+CreateMessageWindow.argtypes = (WindowMessageCallback_t,)
+CreateMessageWindow.restype = HWND
+
+CreateSelectRangeWindow = utilsdll.CreateSelectRangeWindow
+CreateSelectRangeWindow_CB = CFUNCTYPE(
+    None, c_int, c_int, c_int, c_int, c_int, c_int, POINTER(c_char), c_size_t
+)
+CreateSelectRangeWindow.argtypes = (
+    HWND,
+    c_float,
+    c_int,
+    c_int,
+    c_int,
+    c_float,
+    CreateSelectRangeWindow_CB,
+)
+
+
+_bass_code_cast = utilsdll.bass_code_cast
+bass_code_cast_CB = CFUNCTYPE(None, POINTER(c_char), c_size_t)
+_bass_code_cast.argtypes = bass_code_cast_CB, c_char_p, c_size_t, c_char_p, c_int, c_int
+
+
+def bass_code_cast(bs, to="mp3", mp3kbps=0, opusbitrate=0):
+    ret = []
+
+    def cb(ptr, size):
+        ret.append(ptr[:size])
+
+    _bass_code_cast(
+        bass_code_cast_CB(cb), bs, len(bs), to.encode(), mp3kbps, opusbitrate
+    )
+    if ret:
+        return ret[0]
+    return None
+
+
+HSTREAM = DWORD  # sample stream handle
+bass_handle_create = utilsdll.bass_handle_create
+bass_handle_create.argtypes = c_void_p, c_size_t, c_bool
+bass_handle_create.restype = HSTREAM
+bass_handle_free = utilsdll.bass_handle_free
+bass_handle_free.argtypes = (HSTREAM,)
+bass_handle_play = utilsdll.bass_handle_play
+bass_handle_play.argtypes = HSTREAM, c_float
+bass_handle_play.restype = c_bool
+bass_handle_isplaying = utilsdll.bass_handle_isplaying
+bass_handle_isplaying.argtypes = (HSTREAM,)
+bass_handle_isplaying.restype = c_bool
+
+bass_stream_handle_create = utilsdll.bass_stream_handle_create
+bass_stream_handle_create.argtypes = c_void_p, c_size_t
+bass_stream_handle_create.restype = HSTREAM
+bass_stream_push_data = utilsdll.bass_stream_push_data
+bass_stream_push_data.argtypes = HSTREAM, c_void_p, c_size_t
+bass_stream_push_data.restype = c_bool
+
+_SearchDllPath = utilsdll.SearchDllPath
+SearchDllPathCB = CFUNCTYPE(None, LPCWSTR)
+_SearchDllPath.argtypes = LPCWSTR, SearchDllPathCB
+
+
+def SearchDllPath(filename):
+    _ = []
+    _SearchDllPath(filename, SearchDllPathCB(_.append))
+    if _:
+        return _[0]
+
+
+IsDLLBitSameAsMe = utilsdll.IsDLLBitSameAsMe
+IsDLLBitSameAsMe.argtypes = (LPCWSTR,)
+IsDLLBitSameAsMe.restype = c_bool
+
+_AnalysisDllImports = utilsdll.AnalysisDllImports
+AnalysisDllImports_CB = CFUNCTYPE(None, c_char_p, DWORD, c_bool)
+_AnalysisDllImports.argtypes = LPCWSTR, AnalysisDllImports_CB
+_AnalysisDllExports = utilsdll.AnalysisDllExports
+AnalysisDllExports_CB = CFUNCTYPE(None, c_char_p)
+_AnalysisDllExports.argtypes = LPCWSTR, AnalysisDllExports_CB
+
+
+def AnalysisDllExports(file):
+    result: "list[str]" = []
+
+    def _cb(name: bytes):
+        result.append(name.decode())
+
+    _AnalysisDllExports(file, AnalysisDllExports_CB(_cb))
+
+    return result
+
+
+def AnalysisDllImports(file, needNameOnly=True, Allimports=True):
+
+    class Result:
+        def __repr__(self):
+            return str(dict(imports=self.imports, delay_imports=self.delay_imports))
+
+        def __init__(self):
+            self.imports: "list[tuple[str, int]|str]" = []
+            self.delay_imports: "list[tuple[str, int]|str]" = []
+
+    _res = Result()
+
+    def _cb(fn: bytes, off, isimport):
+        if isimport:
+            _res.imports.append((fn.decode(), off))
+        else:
+            _res.delay_imports.append((fn.decode(), off))
+
+    _AnalysisDllImports(file, AnalysisDllImports_CB(_cb))
+    if needNameOnly:
+        _res.imports = [_[0] for _ in _res.imports]
+        _res.delay_imports = [_[0] for _ in _res.delay_imports]
+    if Allimports:
+        return _res.imports + _res.delay_imports
+    return _res
+
+
+# print(
+#     AnalysisDllImports(
+#         r"D:\GitHub\LunaTranslator\src\files\DLL32\CVUtils.dll", False, False
+#     )
+# )
+# print(
+#     AnalysisDllImports(
+#         r"D:\GitHub\LunaTranslator\src\files\DLL64\NativeUtils.dll", False, False
+#     )
+# )
+# print(
+#     AnalysisDllExports(
+#         r"D:\GitHub\LunaTranslator\src\files\DLL64\NativeUtils.dll"
+#     )
+# )
+
+# print(
+#     AnalysisDllExports(r"D:\GitHub\LunaTranslator\src\files\DLL32\CVUtils.dll")
+# )
+
+record_with_vad_create = utilsdll.record_with_vad_create
+record_with_vad_create.restype = c_void_p
+record_with_vad_delete = utilsdll.record_with_vad_delete
+record_with_vad_delete.argtypes = (c_void_p,)
+record_with_vad_get_last_voice = utilsdll.record_with_vad_get_last_voice
+record_with_vad_get_last_voice_CB = CFUNCTYPE(None, POINTER(c_char), c_size_t)
+record_with_vad_get_last_voice.argtypes = c_void_p, record_with_vad_get_last_voice_CB
+
+
+class record_with_vad:
+    def get(self) -> "bytes|None":
+        ret = []
+
+        def _cb(ptr, size):
+            ret.append(ptr[:size])
+
+        record_with_vad_get_last_voice(self.ptr, record_with_vad_get_last_voice_CB(_cb))
+        if not ret:
+            return None
+        return ret[0]
+
+    def __del__(self):
+        record_with_vad_delete(self.ptr)
+
+    def __init__(self):
+        self.ptr = record_with_vad_create()
+        if not self.ptr:
+            raise Exception()
